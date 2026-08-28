@@ -1,11 +1,9 @@
-import os
 import asyncio
 import random
-from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, BusinessMessagesDeleted
 
-# ⚠️ ВСТАВЬ СВОЙ ТОКЕН ОТ BOTFATHER
+# ⚠️ ВСТАВЬ СЮДА СВОЙ ТОКЕН ОТ BOTFATHER
 BOT_TOKEN = "8698964419:AAHt3neQ4J0mHVDv5f4CRT7MiigDn3ThLv0"
 
 bot = Bot(token=BOT_TOKEN)
@@ -14,7 +12,7 @@ dp = Dispatcher()
 msg_cache = {}       
 muted_chats = {}     
 antimute_chats = {}  
-my_owner_id = None   # Сюда автоматически сохранится твой ID при первой команде
+my_owner_id = None   
 
 async def delete_cmd(conn_id: str, chat_id: int, msg_id: int):
     try:
@@ -157,4 +155,82 @@ async def cmd_spam(message: Message):
     except Exception:
         pass
 
-# ==================== 4. ОБРАБОТКА
+# ==================== 4. ОБРАБОТКА И МУТ ====================
+
+@dp.business_message()
+async def handle_all_business_messages(message: Message):
+    global my_owner_id
+    conn_id = message.business_connection_id
+    chat_id = message.chat.id
+    sender_id = message.from_user.id if message.from_user else None
+
+    # При первом вызове команды бот запоминает твой ID
+    if my_owner_id is None and message.text and message.text.startswith("."):
+        my_owner_id = sender_id
+
+    # Удаляем сообщения собеседника, если чат замучен
+    if chat_id in muted_chats:
+        if sender_id != my_owner_id:
+            await delete_cmd(conn_id, chat_id, message.message_id)
+            return
+
+    # Сохраняем сообщения в кэш
+    if message.text:
+        sender_name = message.from_user.first_name if message.from_user else "Собеседник"
+        msg_cache[message.message_id] = {
+            "text": message.text,
+            "name": sender_name,
+            "chat_id": chat_id,
+            "from_me": (sender_id == my_owner_id)
+        }
+
+@dp.edited_business_message()
+async def on_edited_message(message: Message):
+    if message.message_id in msg_cache:
+        old_text = msg_cache[message.message_id]["text"]
+        name = msg_cache[message.message_id]["name"]
+        new_text = message.text
+        
+        if old_text != new_text:
+            await bot.send_message(
+                chat_id=message.business_connection_id,
+                text=f"✏️ **Сообщение было изменено!**\nОт: **{name}**\n\nБыло:\n`{old_text}`\n\nСтало:\n`{new_text}`"
+            )
+            msg_cache[message.message_id]["text"] = new_text
+
+@dp.deleted_business_messages()
+async def on_deleted_messages(event: BusinessMessagesDeleted):
+    for msg_id in event.message_ids:
+        if msg_id in msg_cache:
+            data = msg_cache[msg_id]
+            chat_id = data["chat_id"]
+            
+            if data["from_me"] and chat_id in antimute_chats:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=data["text"],
+                    business_connection_id=event.connection_id
+                )
+            else:
+                text = (
+                    f"🗑 **Это сообщение было удалено:**\n"
+                    f"👤 **От:** {data['name']}\n\n"
+                    f"💬 {data['text']}"
+                )
+                await bot.send_message(
+                    chat_id=event.connection_id,
+                    text=text
+                )
+            del msg_cache[msg_id]
+
+async def main():
+    allowed_updates = [
+        "business_message", 
+        "edited_business_message", 
+        "deleted_business_messages",
+        "callback_query"
+    ]
+    await dp.start_polling(bot, allowed_updates=allowed_updates)
+
+if __name__ == "__main__":
+    asyncio.run(main())
