@@ -3,6 +3,7 @@ import random
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message, 
+    BusinessMessagesDeleted,
     InlineKeyboardMarkup, 
     InlineKeyboardButton, 
     CallbackQuery
@@ -207,9 +208,9 @@ async def on_edited_message(message: Message):
             )
             msg_cache[message.message_id]["text"] = new_text
 
-# Безопасный перехват удалений через бизнес-обработчик событий
-@dp.business_messages_deleted()
-async def on_deleted_messages(event):
+# Перехват удаленных бизнес-сообщений
+@dp.deleted_business_messages()
+async def on_deleted_messages(event: BusinessMessagesDeleted):
     for msg_id in event.message_ids:
         if msg_id in msg_cache:
             data = msg_cache[msg_id]
