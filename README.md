@@ -1,2 +1,0 @@
-# Vladik-bot
-Vladik bot
