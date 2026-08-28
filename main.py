@@ -3,7 +3,6 @@ import random
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message, 
-    BusinessMessagesDeleted, 
     InlineKeyboardMarkup, 
     InlineKeyboardButton, 
     CallbackQuery
@@ -20,11 +19,11 @@ msg_cache = {}       # Кэш сообщений для отслеживания
 muted_chats = {}     # Замученные чаты {chat_id: True}
 antimute_chats = {}  # Чаты с включенным Антимутом {chat_id: True}
 
-# Вспомогательная функция для бесшумного удаления команды
+# Вспомогательная функция для удаления команды
 async def delete_cmd(conn_id: str, chat_id: int, msg_id: int):
     try:
         await bot.delete_business_message(conn_id, chat_id, msg_id)
-    except:
+    except Exception:
         pass
 
 # ==================== 1. МУТ И РАЗМУТ (.mute / .unmute) ====================
@@ -69,7 +68,10 @@ async def cb_unmute(call: CallbackQuery):
     if chat_id in muted_chats:
         del muted_chats[chat_id]
     await call.answer("Чат размучен!")
-    await call.message.edit_text("🔊 **Чат размучен.**")
+    try:
+        await call.message.edit_text("🔊 **Чат размучен.**")
+    except Exception:
+        pass
 
 # ==================== 2. АНТИМУТ (.antimute) ====================
 
@@ -78,10 +80,8 @@ async def cmd_antimute(message: Message):
     conn_id = message.business_connection_id
     chat_id = message.chat.id
     
-    # Удаляем саму команду, чтобы никто не видел
     await delete_cmd(conn_id, chat_id, message.message_id)
 
-    # Переключаем режим Антимута для этого чата
     if chat_id in antimute_chats:
         del antimute_chats[chat_id]
         status = "❌ **Антимут отключен.**"
@@ -89,7 +89,6 @@ async def cmd_antimute(message: Message):
         antimute_chats[chat_id] = True
         status = "🛡 **Антимут включен.** Теперь ваши сообщения защищены."
 
-    # Уведомление в ЛС бота, а не в общий чат
     await bot.send_message(
         chat_id=conn_id,
         text=f"Настройки чата `{chat_id}`:\n{status}"
@@ -114,15 +113,18 @@ async def cmd_type(message: Message):
                 text=current_text + "▒"
             )
             await asyncio.sleep(0.2)
-        except:
+        except Exception:
             pass
             
-    await bot.edit_general_business_message(
-        business_connection_id=conn_id,
-        chat_id=chat_id,
-        message_id=message.message_id,
-        text=current_text
-    )
+    try:
+        await bot.edit_general_business_message(
+            business_connection_id=conn_id,
+            chat_id=chat_id,
+            message_id=message.message_id,
+            text=current_text
+        )
+    except Exception:
+        pass
 
 @dp.business_message(F.text.startswith(".ha"))
 async def cmd_ha(message: Message):
@@ -131,7 +133,7 @@ async def cmd_ha(message: Message):
     
     try:
         count = min(int(message.text.split()[1]), 50)
-    except:
+    except Exception:
         count = 5
 
     await delete_cmd(conn_id, chat_id, message.message_id)
@@ -164,17 +166,17 @@ async def cmd_spam(message: Message):
                 business_connection_id=conn_id
             )
             await asyncio.sleep(0.3)
-    except:
+    except Exception:
         pass
 
-# ==================== 4. ОБРАБОТКА ВСЕХ ВХОДЯЩИХ СООБЩЕНИЙ ====================
+# ==================== 4. ОБРАБОТКА ВХОДЯЩИХ СООБЩЕНИЙ ====================
 
 @dp.business_message()
 async def handle_all_business_messages(message: Message):
     conn_id = message.business_connection_id
     chat_id = message.chat.id
     
-    # 1. Если включен МУТ собеседника — удаляем сообщения собеседника
+    # 1. Если включен МУТ собеседника — удаляем его сообщение
     if chat_id in muted_chats and message.from_user:
         await delete_cmd(conn_id, chat_id, message.message_id)
         return
@@ -186,7 +188,7 @@ async def handle_all_business_messages(message: Message):
             "text": message.text,
             "name": sender_name,
             "chat_id": chat_id,
-            "from_me": message.from_user is None # Флаг: отправлено ли тобой
+            "from_me": message.from_user is None
         }
 
 # ==================== 5. ПЕРЕХВАТ ИЗМЕНЕНИЙ И УДАЛЕНИЙ ====================
@@ -205,14 +207,14 @@ async def on_edited_message(message: Message):
             )
             msg_cache[message.message_id]["text"] = new_text
 
+# Безопасный перехват удалений через бизнес-обработчик событий
 @dp.business_messages_deleted()
-async def on_deleted_messages(event: BusinessMessagesDeleted):
+async def on_deleted_messages(event):
     for msg_id in event.message_ids:
         if msg_id in msg_cache:
             data = msg_cache[msg_id]
             chat_id = data["chat_id"]
             
-            # АНТИМУТ: Если удалили ТВОЁ сообщение и в этом чате включен .antimute
             if data["from_me"] and chat_id in antimute_chats:
                 await bot.send_message(
                     chat_id=chat_id,
@@ -220,7 +222,6 @@ async def on_deleted_messages(event: BusinessMessagesDeleted):
                     business_connection_id=event.connection_id
                 )
             else:
-                # Обычная ловля удалёнок собеседника
                 text = (
                     f"🗑 **Это сообщение было удалено:**\n"
                     f"👤 **От:** {data['name']}\n\n"
