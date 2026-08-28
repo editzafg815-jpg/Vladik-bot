@@ -1,5 +1,7 @@
+import os
 import asyncio
 import random
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message, 
@@ -9,25 +11,22 @@ from aiogram.types import (
     CallbackQuery
 )
 
-# ⚠️ ВСТАВЬ СЮДА СВОЙ ТОКЕН ОТ BOTFATHER
 BOT_TOKEN = "8698964419:AAGf5k1EKv-nVjXZtxoxLl3ROLgl3D4eY-A"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Базы данных в памяти
-msg_cache = {}       # Кэш сообщений для отслеживания удалений/изменений
-muted_chats = {}     # Замученные чаты {chat_id: True}
-antimute_chats = {}  # Чаты с включенным Антимутом {chat_id: True}
+msg_cache = {}       
+muted_chats = {}     
+antimute_chats = {}  
 
-# Вспомогательная функция для удаления команды
 async def delete_cmd(conn_id: str, chat_id: int, msg_id: int):
     try:
         await bot.delete_business_message(conn_id, chat_id, msg_id)
     except Exception:
         pass
 
-# ==================== 1. МУТ И РАЗМУТ (.mute / .unmute) ====================
+# ==================== МУТ / РАЗМУТ / АНТИМУТ ====================
 
 @dp.business_message(F.text == ".mute")
 async def cmd_mute(message: Message):
@@ -74,8 +73,6 @@ async def cb_unmute(call: CallbackQuery):
     except Exception:
         pass
 
-# ==================== 2. АНТИМУТ (.antimute) ====================
-
 @dp.business_message(F.text == ".antimute")
 async def cmd_antimute(message: Message):
     conn_id = message.business_connection_id
@@ -95,7 +92,7 @@ async def cmd_antimute(message: Message):
         text=f"Настройки чата `{chat_id}`:\n{status}"
     )
 
-# ==================== 3. АНИМАЦИИ И СПАМ (.type, .ha, .spam) ====================
+# ==================== АНИМАЦИИ И СПАМ ====================
 
 @dp.business_message(F.text.startswith(".type "))
 async def cmd_type(message: Message):
@@ -170,19 +167,17 @@ async def cmd_spam(message: Message):
     except Exception:
         pass
 
-# ==================== 4. ОБРАБОТКА ВХОДЯЩИХ СООБЩЕНИЙ ====================
+# ==================== ОБРАБОТКА ВХОДЯЩИХ СООБЩЕНИЙ ====================
 
 @dp.business_message()
 async def handle_all_business_messages(message: Message):
     conn_id = message.business_connection_id
     chat_id = message.chat.id
     
-    # 1. Если включен МУТ собеседника — удаляем его сообщение
     if chat_id in muted_chats and message.from_user:
         await delete_cmd(conn_id, chat_id, message.message_id)
         return
 
-    # 2. Кэширование для ловли удалёнок и редактирований
     if message.text:
         sender_name = message.from_user.first_name if message.from_user else "Пользователь"
         msg_cache[message.message_id] = {
@@ -191,8 +186,6 @@ async def handle_all_business_messages(message: Message):
             "chat_id": chat_id,
             "from_me": message.from_user is None
         }
-
-# ==================== 5. ПЕРЕХВАТ ИЗМЕНЕНИЙ И УДАЛЕНИЙ ====================
 
 @dp.edited_business_message()
 async def on_edited_message(message: Message):
@@ -208,7 +201,6 @@ async def on_edited_message(message: Message):
             )
             msg_cache[message.message_id]["text"] = new_text
 
-# Перехват удаленных бизнес-сообщений
 @dp.deleted_business_messages()
 async def on_deleted_messages(event: BusinessMessagesDeleted):
     for msg_id in event.message_ids:
@@ -234,7 +226,22 @@ async def on_deleted_messages(event: BusinessMessagesDeleted):
                 )
             del msg_cache[msg_id]
 
+# Простой HTTP сервер для пройденной проверки Render
+async def handle_ping(request):
+    return web.Response(text="Bot is alive!")
+
 async def main():
+    # Настройка мини веб-сервера
+    app = web.Application()
+    app.router.add_get('/', handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    
+    # Запуск бота
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
