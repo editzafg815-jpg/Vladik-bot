@@ -13,7 +13,7 @@ from aiogram.types import (
 )
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 
-BOT_TOKEN = "8698964419:AAHt3neQ4J0mHVDv5f4CRT7MiigDn3ThLv0"
+BOT_TOKEN = "8698964419:AAGBF8RLS2fOHMCPAqpibJIUxxjd64mD6a8"
 
 DB_FILE = "business_bot.db"
 MUTE_DELETE_DELAY = 0
