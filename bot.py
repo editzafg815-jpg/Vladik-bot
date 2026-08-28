@@ -1,6 +1,8 @@
 import asyncio
+import logging
 import os
 import sqlite3
+
 from aiohttp import web
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import (
@@ -11,12 +13,15 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
-from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.exceptions import TelegramAPIError
 
-BOT_TOKEN = "8698964419:AAGBF8RLS2fOHMCPAqpibJIUxxjd64mD6a8"
-
+BOT_TOKEN = os.getenv("8698964419:AAGBF8RLS2fOHMCPAqpibJIUxxjd64mD6a8")
 DB_FILE = "business_bot.db"
-MUTE_DELETE_DELAY = 0
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
@@ -24,6 +29,8 @@ router = Router()
 dp.include_router(router)
 
 db = sqlite3.connect(DB_FILE, check_same_thread=False)
+db.execute("PRAGMA journal_mode=WAL")
+db.execute("PRAGMA synchronous=NORMAL")
 
 db.execute("""
 CREATE TABLE IF NOT EXISTS connections(
@@ -38,7 +45,7 @@ CREATE TABLE IF NOT EXISTS chats(
     chat_id INTEGER NOT NULL,
     muted INTEGER DEFAULT 0,
     clone_enabled INTEGER DEFAULT 0,
-    PRIMARY KEY(connection_id,chat_id)
+    PRIMARY KEY(connection_id, chat_id)
 )
 """)
 
@@ -52,14 +59,14 @@ CREATE TABLE IF NOT EXISTS messages(
     username TEXT,
     text TEXT,
     date TEXT,
-    PRIMARY KEY(connection_id,chat_id,message_id)
+    PRIMARY KEY(connection_id, chat_id, message_id)
 )
 """)
 
 db.commit()
 
 
-def get_owner(cid):
+def get_owner(cid: str):
     row = db.execute(
         "SELECT owner_id FROM connections WHERE connection_id=?",
         (cid,)
@@ -67,43 +74,47 @@ def get_owner(cid):
     return row[0] if row else None
 
 
-def set_mute(cid, chat_id, value):
+def set_mute(cid: str, chat_id: int, value: bool):
     db.execute("""
-        INSERT INTO chats(connection_id,chat_id,muted)
-        VALUES(?,?,?)
-        ON CONFLICT(connection_id,chat_id)
+        INSERT INTO chats(connection_id, chat_id, muted)
+        VALUES (?, ?, ?)
+        ON CONFLICT(connection_id, chat_id)
         DO UPDATE SET muted=excluded.muted
     """, (cid, chat_id, int(value)))
     db.commit()
 
 
-def is_muted(cid, chat_id):
+def is_muted(cid: str, chat_id: int) -> bool:
     row = db.execute("""
-        SELECT muted FROM chats
+        SELECT muted
+        FROM chats
         WHERE connection_id=? AND chat_id=?
     """, (cid, chat_id)).fetchone()
+
     return bool(row and row[0])
 
 
-def set_clone(cid, chat_id, value):
+def set_clone(cid: str, chat_id: int, value: bool):
     db.execute("""
-        INSERT INTO chats(connection_id,chat_id,clone_enabled)
-        VALUES(?,?,?)
-        ON CONFLICT(connection_id,chat_id)
+        INSERT INTO chats(connection_id, chat_id, clone_enabled)
+        VALUES (?, ?, ?)
+        ON CONFLICT(connection_id, chat_id)
         DO UPDATE SET clone_enabled=excluded.clone_enabled
     """, (cid, chat_id, int(value)))
     db.commit()
 
 
-def is_clone(cid, chat_id):
+def is_clone(cid: str, chat_id: int) -> bool:
     row = db.execute("""
-        SELECT clone_enabled FROM chats
+        SELECT clone_enabled
+        FROM chats
         WHERE connection_id=? AND chat_id=?
     """, (cid, chat_id)).fetchone()
+
     return bool(row and row[0])
 
 
-def save_message(message):
+def save_message(message: Message):
     cid = message.business_connection_id
 
     if not cid:
@@ -115,8 +126,17 @@ def save_message(message):
     text = message.text or message.caption or ""
 
     db.execute("""
-        INSERT OR REPLACE INTO messages
-        VALUES(?,?,?,?,?,?,?,?)
+        INSERT OR REPLACE INTO messages(
+            connection_id,
+            chat_id,
+            message_id,
+            user_id,
+            name,
+            username,
+            text,
+            date
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         cid,
         message.chat.id,
@@ -131,12 +151,36 @@ def save_message(message):
     db.commit()
 
 
+async def delete_business_message(cid: str, message_id: int):
+    try:
+        await bot.delete_business_messages(
+            business_connection_id=cid,
+            message_ids=[message_id]
+        )
+        return True
+    except TelegramAPIError as e:
+        logging.error(
+            "DELETE ERROR | connection=%s | message=%s | %s",
+            cid,
+            message_id,
+            e
+        )
+        return False
+    except Exception as e:
+        logging.exception(
+            "DELETE UNKNOWN ERROR | connection=%s | message=%s",
+            cid,
+            message_id
+        )
+        return False
+
+
 @router.business_connection()
 async def connection_handler(connection: BusinessConnection):
 
     db.execute("""
-        INSERT INTO connections(connection_id,owner_id)
-        VALUES(?,?)
+        INSERT INTO connections(connection_id, owner_id)
+        VALUES (?, ?)
         ON CONFLICT(connection_id)
         DO UPDATE SET owner_id=excluded.owner_id
     """, (
@@ -145,6 +189,12 @@ async def connection_handler(connection: BusinessConnection):
     ))
 
     db.commit()
+
+    logging.info(
+        "BUSINESS CONNECTED | connection=%s | owner=%s",
+        connection.id,
+        connection.user.id
+    )
 
 
 @router.business_message()
@@ -158,147 +208,164 @@ async def business_message_handler(message: Message):
     owner = get_owner(cid)
 
     if not owner:
+        logging.warning(
+            "OWNER NOT FOUND | connection=%s",
+            cid
+        )
         return
 
     save_message(message)
 
     uid = message.from_user.id if message.from_user else None
-    text = (message.text or message.caption or "").strip()
+    text = (message.text or message.caption or "").strip().lower()
+
+    chat_id = message.chat.id
+    message_id = message.message_id
+
+    # =========================
+    # OWNER COMMANDS
+    # =========================
+
+    if uid == owner:
+
+        if text == ".mute":
+
+            set_mute(cid, chat_id, True)
+
+            await delete_business_message(
+                cid,
+                message_id
+            )
+
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="🔓 Размутить",
+                            callback_data=f"unmute:{cid}:{chat_id}"
+                        )
+                    ]
+                ]
+            )
+
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "🔇 <b>Чат замьючен.</b>\n\n"
+                        "Сообщения пользователя будут "
+                        "автоматически удаляться."
+                    ),
+                    parse_mode="HTML",
+                    reply_markup=keyboard,
+                    business_connection_id=cid
+                )
+            except TelegramAPIError as e:
+                logging.error("MUTE MESSAGE ERROR: %s", e)
+
+            return
+
+        if text == ".unmute":
+
+            set_mute(cid, chat_id, False)
+
+            await delete_business_message(
+                cid,
+                message_id
+            )
+
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="🔊 <b>Чат размьючен.</b>",
+                    parse_mode="HTML",
+                    business_connection_id=cid
+                )
+            except TelegramAPIError as e:
+                logging.error("UNMUTE MESSAGE ERROR: %s", e)
+
+            return
+
+        if text == ".clone":
+
+            set_clone(cid, chat_id, True)
+
+            await delete_business_message(
+                cid,
+                message_id
+            )
+
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="📋 <b>Clone включён.</b>",
+                    parse_mode="HTML",
+                    business_connection_id=cid
+                )
+            except TelegramAPIError as e:
+                logging.error("CLONE MESSAGE ERROR: %s", e)
+
+            return
+
+        if text == ".unclone":
+
+            set_clone(cid, chat_id, False)
+
+            await delete_business_message(
+                cid,
+                message_id
+            )
+
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="📋 <b>Clone выключен.</b>",
+                    parse_mode="HTML",
+                    business_connection_id=cid
+                )
+            except TelegramAPIError as e:
+                logging.error("UNCLONE MESSAGE ERROR: %s", e)
+
+            return
+
+        return
 
     # =========================
     # MUTE
     # =========================
 
-    if uid == owner and text.lower() == ".mute":
+    if is_muted(cid, chat_id):
 
-        set_mute(cid, message.chat.id, True)
-
-        try:
-            await bot.delete_business_messages(
-                business_connection_id=cid,
-                message_ids=[message.message_id]
+        # Без sleep — удаление отправляется сразу.
+        asyncio.create_task(
+            delete_business_message(
+                cid,
+                message_id
             )
-        except Exception:
-            pass
-
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="🔓 Размутить",
-                        callback_data=f"unmute:{cid}:{message.chat.id}"
-                    )
-                ]
-            ]
         )
 
-        try:
-            await bot.send_message(
-                chat_id=message.chat.id,
-                text=(
-                    "🔇 <b>Вы больше не можете говорить.</b>\n\n"
-                    "Ваши сообщения будут автоматически удаляться."
-                ),
-                parse_mode="HTML",
-                reply_markup=keyboard,
-                business_connection_id=cid
-            )
-        except Exception:
-            pass
-
-        return
-
-    # =========================
-    # UNMUTE
-    # =========================
-
-    if uid == owner and text.lower() == ".unmute":
-
-        set_mute(cid, message.chat.id, False)
-
-        try:
-            await bot.delete_business_messages(
-                business_connection_id=cid,
-                message_ids=[message.message_id]
-            )
-        except Exception:
-            pass
-
-        try:
-            await bot.send_message(
-                chat_id=message.chat.id,
-                text="🔊 <b>Вы снова можете говорить.</b>",
-                parse_mode="HTML",
-                business_connection_id=cid
-            )
-        except Exception:
-            pass
-
         return
 
     # =========================
     # CLONE
     # =========================
 
-    if uid == owner and text.lower() == ".clone":
-
-        set_clone(cid, message.chat.id, True)
-
-        try:
-            await bot.delete_business_messages(
-                business_connection_id=cid,
-                message_ids=[message.message_id]
-            )
-        except Exception:
-            pass
-
-        return
-
-    if uid == owner and text.lower() == ".unclone":
-
-        set_clone(cid, message.chat.id, False)
-
-        try:
-            await bot.delete_business_messages(
-                business_connection_id=cid,
-                message_ids=[message.message_id]
-            )
-        except Exception:
-            pass
-
-        return
-
-    # =========================
-    # MUTE AUTO DELETE
-    # =========================
-
-    if uid != owner and is_muted(cid, message.chat.id):
-
-        try:
-            await bot.delete_business_messages(
-                business_connection_id=cid,
-                message_ids=[message.message_id]
-            )
-        except Exception:
-            pass
-
-        return
-
-    # =========================
-    # CLONE
-    # =========================
-
-    if uid != owner and is_clone(cid, message.chat.id):
+    if is_clone(cid, chat_id):
 
         try:
             await bot.copy_message(
-                chat_id=message.chat.id,
-                from_chat_id=message.chat.id,
-                message_id=message.message_id,
+                chat_id=chat_id,
+                from_chat_id=chat_id,
+                message_id=message_id,
                 business_connection_id=cid
             )
-        except Exception:
-            pass
+        except TelegramAPIError as e:
+            logging.error(
+                "CLONE ERROR | connection=%s | message=%s | %s",
+                cid,
+                message_id,
+                e
+            )
 
 
 @router.edited_business_message()
@@ -315,7 +382,7 @@ async def edited_message_handler(message: Message):
         return
 
     old = db.execute("""
-        SELECT user_id,name,username,text
+        SELECT user_id, name, username, text
         FROM messages
         WHERE connection_id=?
         AND chat_id=?
@@ -330,20 +397,32 @@ async def edited_message_handler(message: Message):
 
     if old and old[0] != owner:
 
-        username = f"@{old[2]}" if old[2] else "без username"
-
-        await bot.send_message(
-            chat_id=owner,
-            text=(
-                "✏️ <b>Сообщение изменено</b>\n\n"
-                f"👤 От: <b>{old[1]}</b>\n"
-                f"🆔 {username}\n"
-                f"🕐 {message.date}\n\n"
-                f"<b>Было:</b>\n{old[3] or '[пусто]'}\n\n"
-                f"<b>Стало:</b>\n{new_text}"
-            ),
-            parse_mode="HTML"
+        username = (
+            f"@{old[2]}"
+            if old[2]
+            else "без username"
         )
+
+        try:
+            await bot.send_message(
+                chat_id=owner,
+                text=(
+                    "✏️ <b>Сообщение изменено</b>\n\n"
+                    f"👤 От: <b>{old[1]}</b>\n"
+                    f"🆔 {username}\n"
+                    f"🕐 {message.date}\n\n"
+                    f"<b>Было:</b>\n"
+                    f"{old[3] or '[пусто]'}\n\n"
+                    f"<b>Стало:</b>\n"
+                    f"{new_text}"
+                ),
+                parse_mode="HTML"
+            )
+        except TelegramAPIError as e:
+            logging.error(
+                "EDIT NOTIFICATION ERROR: %s",
+                e
+            )
 
     save_message(message)
 
@@ -354,6 +433,10 @@ async def deleted_messages_handler(
 ):
 
     cid = update.business_connection_id
+
+    if not cid:
+        return
+
     owner = get_owner(cid)
 
     if not owner:
@@ -362,7 +445,7 @@ async def deleted_messages_handler(
     for message_id in update.message_ids:
 
         old = db.execute("""
-            SELECT user_id,name,username,text
+            SELECT user_id, name, username, text, date
             FROM messages
             WHERE connection_id=?
             AND chat_id=?
@@ -379,19 +462,29 @@ async def deleted_messages_handler(
         if old[0] == owner:
             continue
 
-        username = f"@{old[2]}" if old[2] else "без username"
-
-        await bot.send_message(
-            chat_id=owner,
-            text=(
-                "🗑 <b>Сообщение удалено</b>\n\n"
-                f"👤 От: <b>{old[1]}</b>\n"
-                f"🆔 {username}\n"
-                f"🕐 {old[3] or ''}\n\n"
-                f"💬 {old[3] or '[медиа]'}"
-            ),
-            parse_mode="HTML"
+        username = (
+            f"@{old[2]}"
+            if old[2]
+            else "без username"
         )
+
+        try:
+            await bot.send_message(
+                chat_id=owner,
+                text=(
+                    "🗑 <b>Сообщение удалено</b>\n\n"
+                    f"👤 От: <b>{old[1]}</b>\n"
+                    f"🆔 {username}\n"
+                    f"🕐 {old[4]}\n\n"
+                    f"💬 {old[3] or '[медиа]'}"
+                ),
+                parse_mode="HTML"
+            )
+        except TelegramAPIError as e:
+            logging.error(
+                "DELETE NOTIFICATION ERROR: %s",
+                e
+            )
 
 
 @router.callback_query(F.data.startswith("unmute:"))
@@ -412,7 +505,7 @@ async def unmute_button(callback: CallbackQuery):
     if not owner or callback.from_user.id != owner:
 
         await callback.answer(
-            "⛔ Размутить может только владелец.",
+            "⛔ Только владелец.",
             show_alert=True
         )
 
@@ -420,17 +513,22 @@ async def unmute_button(callback: CallbackQuery):
 
     set_mute(cid, chat_id, False)
 
-    await callback.answer("🔓 Размучено!")
+    await callback.answer(
+        "🔓 Размучено!"
+    )
 
     try:
         await bot.send_message(
             chat_id=chat_id,
-            text="🔊 <b>Вы снова можете говорить.</b>",
+            text="🔊 <b>Чат размьючен.</b>",
             parse_mode="HTML",
             business_connection_id=cid
         )
-    except Exception:
-        pass
+    except TelegramAPIError as e:
+        logging.error(
+            "BUTTON UNMUTE ERROR: %s",
+            e
+        )
 
 
 @router.message(F.text == "/start")
@@ -438,10 +536,10 @@ async def start_handler(message: Message):
 
     await message.answer(
         "🤖 <b>Business Bot</b>\n\n"
-        ".mute — включить автоудаление\n"
-        ".unmute — выключить автоудаление\n"
-        ".clone — включить clone\n"
-        ".unclone — выключить clone",
+        "🔇 .mute — включить mute\n"
+        "🔊 .unmute — выключить mute\n"
+        "📋 .clone — включить clone\n"
+        "📋 .unclone — выключить clone",
         parse_mode="HTML"
     )
 
@@ -457,9 +555,12 @@ async def web_server():
     app.router.add_get("/", health)
     app.router.add_get("/health", health)
 
-    port = int(os.getenv("PORT", "10000"))
+    port = int(
+        os.getenv("PORT", "10000")
+    )
 
     runner = web.AppRunner(app)
+
     await runner.setup()
 
     site = web.TCPSite(
@@ -470,10 +571,22 @@ async def web_server():
 
     await site.start()
 
+    logging.info(
+        "WEB SERVER STARTED | PORT=%s",
+        port
+    )
+
 
 async def main():
 
+    if not BOT_TOKEN or BOT_TOKEN == "ВСТАВЬ_СЮДА_ТОКЕН_БОТА":
+        raise RuntimeError(
+            "BOT_TOKEN не установлен"
+        )
+
     await web_server()
+
+    logging.info("BOT STARTED")
 
     await dp.start_polling(
         bot,
