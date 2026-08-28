@@ -19,7 +19,7 @@ from aiogram.exceptions import TelegramAPIError
 # ВСТАВЬ СЮДА ТОКЕН БОТА
 # =========================================================
 
-BOT_TOKEN = "8698964419:AAGBF8RLS2fOHMCPAqpibJIUxxjd64mD6a8"
+BOT_TOKEN = "8698964419:AAEakXd2JyHmAiJaHhV7EqFzRL_aqtj_s1A"
 
 # =========================================================
 
