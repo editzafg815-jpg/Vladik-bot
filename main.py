@@ -3,14 +3,9 @@ import asyncio
 import random
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import (
-    Message, 
-    BusinessMessagesDeleted,
-    InlineKeyboardMarkup, 
-    InlineKeyboardButton, 
-    CallbackQuery
-)
+from aiogram.types import Message, BusinessMessagesDeleted
 
+# ⚠️ ВСТАВЬ СЮДА СВОЙ ТОКЕН ОТ BOTFATHER
 BOT_TOKEN = "8698964419:AAGf5k1EKv-nVjXZtxoxLl3ROLgl3D4eY-A"
 
 bot = Bot(token=BOT_TOKEN)
@@ -26,7 +21,7 @@ async def delete_cmd(conn_id: str, chat_id: int, msg_id: int):
     except Exception:
         pass
 
-# ==================== МУТ / РАЗМУТ / АНТИМУТ ====================
+# ==================== 1. МУТ И РАЗМУТ (.mute / .unmute) ====================
 
 @dp.business_message(F.text == ".mute")
 async def cmd_mute(message: Message):
@@ -36,15 +31,11 @@ async def cmd_mute(message: Message):
     await delete_cmd(conn_id, chat_id, message.message_id)
     muted_chats[chat_id] = True
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🔊 Размутить", callback_data=f"unmute:{chat_id}")
-    ]])
-
+    # Отправляем уведомление без кнопок, чтобы собеседник не мог размутиться сам
     await bot.send_message(
         chat_id=chat_id,
-        text="🔊 **Вы больше не можете писать.**",
-        business_connection_id=conn_id,
-        reply_markup=kb
+        text="🔇 **Чат замучен. Ваши сообщения автоматически удаляются.**",
+        business_connection_id=conn_id
     )
 
 @dp.business_message(F.text == ".unmute")
@@ -62,16 +53,7 @@ async def cmd_unmute(message: Message):
         business_connection_id=conn_id
     )
 
-@dp.callback_query(F.data.startswith("unmute:"))
-async def cb_unmute(call: CallbackQuery):
-    chat_id = int(call.data.split(":")[1])
-    if chat_id in muted_chats:
-        del muted_chats[chat_id]
-    await call.answer("Чат размучен!")
-    try:
-        await call.message.edit_text("🔊 **Чат размучен.**")
-    except Exception:
-        pass
+# ==================== 2. АНТИМУТ (.antimute) ====================
 
 @dp.business_message(F.text == ".antimute")
 async def cmd_antimute(message: Message):
@@ -85,14 +67,14 @@ async def cmd_antimute(message: Message):
         status = "❌ **Антимут отключен.**"
     else:
         antimute_chats[chat_id] = True
-        status = "🛡 **Антимут включен.** Теперь ваши сообщения защищены."
+        status = "🛡 **Антимут включен.** Сообщения защищены."
 
     await bot.send_message(
         chat_id=conn_id,
         text=f"Настройки чата `{chat_id}`:\n{status}"
     )
 
-# ==================== АНИМАЦИИ И СПАМ ====================
+# ==================== 3. БЫСТРЫЙ СПАМ И АНИМАЦИИ ====================
 
 @dp.business_message(F.text.startswith(".type "))
 async def cmd_type(message: Message):
@@ -110,7 +92,7 @@ async def cmd_type(message: Message):
                 message_id=message.message_id,
                 text=current_text + "▒"
             )
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.1)
         except Exception:
             pass
             
@@ -143,7 +125,7 @@ async def cmd_ha(message: Message):
             text=random.choice(ha_variants),
             business_connection_id=conn_id
         )
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(0.05)  # Максимально быстрый спам
 
 @dp.business_message(F.text.startswith(".spam "))
 async def cmd_spam(message: Message):
@@ -163,28 +145,33 @@ async def cmd_spam(message: Message):
                 text=spam_text,
                 business_connection_id=conn_id
             )
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.05)  # Максимально быстрый спам
     except Exception:
         pass
 
-# ==================== ОБРАБОТКА ВХОДЯЩИХ СООБЩЕНИЙ ====================
+# ==================== 4. ОБРАБОТКА И УДАЛЕНИЕ МУТА ====================
 
 @dp.business_message()
 async def handle_all_business_messages(message: Message):
     conn_id = message.business_connection_id
     chat_id = message.chat.id
-    
-    if chat_id in muted_chats and message.from_user:
+
+    # В бизнес-сообщениях outgoing=False означает, что пишет СОБЕСЕДНИК
+    is_incoming = not message.outgoing
+
+    # Если чат замучен и пишет собеседник — удаляем мгновенно
+    if chat_id in muted_chats and is_incoming:
         await delete_cmd(conn_id, chat_id, message.message_id)
         return
 
+    # Сохраняем в кэш для удалёнок/изменений
     if message.text:
-        sender_name = message.from_user.first_name if message.from_user else "Пользователь"
+        sender_name = message.from_user.first_name if message.from_user else "Собеседник"
         msg_cache[message.message_id] = {
             "text": message.text,
             "name": sender_name,
             "chat_id": chat_id,
-            "from_me": message.from_user is None
+            "from_me": message.outgoing
         }
 
 @dp.edited_business_message()
@@ -226,12 +213,11 @@ async def on_deleted_messages(event: BusinessMessagesDeleted):
                 )
             del msg_cache[msg_id]
 
-# Простой HTTP сервер для пройденной проверки Render
+# Веб-сервер для Render
 async def handle_ping(request):
     return web.Response(text="Bot is alive!")
 
 async def main():
-    # Настройка мини веб-сервера
     app = web.Application()
     app.router.add_get('/', handle_ping)
     runner = web.AppRunner(app)
@@ -241,8 +227,13 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     
-    # Запуск бота
-    await dp.start_polling(bot)
+    allowed_updates = [
+        "business_message", 
+        "edited_business_message", 
+        "deleted_business_messages",
+        "callback_query"
+    ]
+    await dp.start_polling(bot, allowed_updates=allowed_updates)
 
 if __name__ == "__main__":
     asyncio.run(main())
