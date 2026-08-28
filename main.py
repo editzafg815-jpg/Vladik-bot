@@ -10,7 +10,7 @@ from aiogram.types import (
 )
 
 # ⚠️ ВСТАВЬ СЮДА СВОЙ ТОКЕН ОТ BOTFATHER
-BOT_TOKEN = "ТВОЙ_ТОКЕН_ОТ_BOTFATHER"
+BOT_TOKEN = "8698964419:AAGf5k1EKv-nVjXZtxoxLl3ROLgl3D4eY-A"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
