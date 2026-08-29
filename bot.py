@@ -155,9 +155,18 @@ async def business_message_handler(message: Message):
     cid = message.business_connection_id
     if not cid:
         return
+    
     owner = get_owner(cid)
-    if not owner:
-        return
+    
+    # Авто-регистрация владельца, если соединение еще не сохранилось в БД
+    if not owner and message.from_user:
+        owner = message.from_user.id
+        db.execute("""
+        INSERT INTO connections(connection_id, owner_id)
+        VALUES (?, ?)
+        ON CONFLICT(connection_id) DO UPDATE SET owner_id=excluded.owner_id
+        """, (cid, owner))
+        db.commit()
 
     save_message(message)
 
@@ -166,113 +175,21 @@ async def business_message_handler(message: Message):
     text = text_raw.lower()
     chat_id = message.chat.id
 
-    # =====================================================
-    # SPAM (.spam <кол-во> <текст>) 5мс пауза
-    # =====================================================
-    if uid == owner and text.startswith(".spam "):
-        await delete_message(cid, message.message_id)
-        try:
-            parts = text_raw.split(maxsplit=2)
-            count = min(int(parts[1]), 100)
-            spam_text = parts[2]
-            for _ in range(count):
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=spam_text,
-                    business_connection_id=cid
-                )
-                await asyncio.sleep(0.005)
-        except Exception as e:
-            logging.error("SPAM ERROR: %s", e)
-        return
+    # Проверка: сообщение от владельца бизнеса (от тебя)
+    is_me = (uid == owner) or getattr(message, "is_from_offline", False)
 
     # =====================================================
-    # HA (.ha <кол-во>) 5мс пауза
+    # МГНОВЕННЫЙ АВТО-МУТ (УДАЛЕНИЕ ЗА 5 МС)
     # =====================================================
-    if uid == owner and text.startswith(".ha"):
-        await delete_message(cid, message.message_id)
-        try:
-            parts = text_raw.split()
-            count = min(int(parts[1]), 100) if len(parts) > 1 else 5
-            ha_variants = ["ахахах", "АХАХАХА", "ахахахаххах", "хахаха", "АХАХАХАХАХАХ"]
-            for _ in range(count):
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=random.choice(ha_variants),
-                    business_connection_id=cid
-                )
-                await asyncio.sleep(0.005)
-        except Exception as e:
-            logging.error("HA SPAM ERROR: %s", e)
-        return
-
-    # =====================================================
-    # MUTE
-    # =====================================================
-    if uid == owner and text == ".mute":
-        set_mute(cid, chat_id, True)
-        await delete_message(cid, message.message_id)
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[[
-                InlineKeyboardButton(
-                    text="🔓 Размутить",
-                    callback_data=f"unmute:{cid}:{chat_id}"
-                )
-            ]]
-        )
-        try:
-            await bot.send_message(
-                chat_id=chat_id,
-                text="🔇 <b>Пользователь замьючен.</b>\n\nЕго сообщения будут автоматически удаляться.",
-                parse_mode="HTML",
-                reply_markup=keyboard,
-                business_connection_id=cid
-            )
-        except TelegramAPIError as e:
-            logging.error("MUTE MESSAGE ERROR: %s", e)
-        return
-
-    # =====================================================
-    # UNMUTE
-    # =====================================================
-    if uid == owner and text == ".unmute":
-        set_mute(cid, chat_id, False)
-        await delete_message(cid, message.message_id)
-        try:
-            await bot.send_message(
-                chat_id=chat_id,
-                text="🔊 <b>Пользователь размьючен.</b>",
-                parse_mode="HTML",
-                business_connection_id=cid
-            )
-        except TelegramAPIError as e:
-            logging.error("UNMUTE ERROR: %s", e)
-        return
-
-    # =====================================================
-    # CLONE
-    # =====================================================
-    if uid == owner and text == ".clone":
-        set_clone(cid, chat_id, True)
-        await delete_message(cid, message.message_id)
-        return
-
-    if uid == owner and text == ".unclone":
-        set_clone(cid, chat_id, False)
+    if not is_me and is_muted(cid, chat_id):
+        await asyncio.sleep(0.005)
         await delete_message(cid, message.message_id)
         return
 
     # =====================================================
-    # AUTO MUTE DELETE
+    # КЛОН
     # =====================================================
-    if uid != owner and is_muted(cid, chat_id):
-        asyncio.create_task(delete_message(cid, message.message_id))
-        return
-
-    # =====================================================
-    # CLONE EXECUTE
-    # =====================================================
-    if uid != owner and is_clone(cid, chat_id):
+    if not is_me and is_clone(cid, chat_id):
         try:
             await bot.copy_message(
                 chat_id=chat_id,
@@ -282,6 +199,97 @@ async def business_message_handler(message: Message):
             )
         except TelegramAPIError as e:
             logging.error("CLONE ERROR: %s", e)
+        return
+
+    # =====================================================
+    # КОМАНДЫ ВЛАДЕЛЬЦА
+    # =====================================================
+    if is_me:
+        # SPAM (.spam <кол-во> <текст>)
+        if text.startswith(".spam "):
+            await delete_message(cid, message.message_id)
+            try:
+                parts = text_raw.split(maxsplit=2)
+                count = min(int(parts[1]), 100)
+                spam_text = parts[2]
+                for _ in range(count):
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=spam_text,
+                        business_connection_id=cid
+                    )
+                    await asyncio.sleep(0.005)
+            except Exception as e:
+                logging.error("SPAM ERROR: %s", e)
+            return
+
+        # HA (.ha <кол-во>)
+        if text.startswith(".ha"):
+            await delete_message(cid, message.message_id)
+            try:
+                parts = text_raw.split()
+                count = min(int(parts[1]), 100) if len(parts) > 1 else 5
+                ha_variants = ["ахахах", "АХАХАХА", "ахахахаххах", "хахаха", "АХАХАХАХАХАХ"]
+                for _ in range(count):
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=random.choice(ha_variants),
+                        business_connection_id=cid
+                    )
+                    await asyncio.sleep(0.005)
+            except Exception as e:
+                logging.error("HA SPAM ERROR: %s", e)
+            return
+
+        # MUTE
+        if text == ".mute":
+            set_mute(cid, chat_id, True)
+            await delete_message(cid, message.message_id)
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text="🔓 Размутить",
+                        callback_data=f"unmute:{cid}:{chat_id}"
+                    )
+                ]]
+            )
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="🔇 <b>Пользователь замьючен.</b>\n\nЕго сообщения будут автоматически удаляться.",
+                    parse_mode="HTML",
+                    reply_markup=keyboard,
+                    business_connection_id=cid
+                )
+            except TelegramAPIError as e:
+                logging.error("MUTE MESSAGE ERROR: %s", e)
+            return
+
+        # UNMUTE
+        if text == ".unmute":
+            set_mute(cid, chat_id, False)
+            await delete_message(cid, message.message_id)
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="🔊 <b>Пользователь размьючен.</b>",
+                    parse_mode="HTML",
+                    business_connection_id=cid
+                )
+            except TelegramAPIError as e:
+                logging.error("UNMUTE ERROR: %s", e)
+            return
+
+        # CLONE
+        if text == ".clone":
+            set_clone(cid, chat_id, True)
+            await delete_message(cid, message.message_id)
+            return
+
+        if text == ".unclone":
+            set_clone(cid, chat_id, False)
+            await delete_message(cid, message.message_id)
+            return
 
 
 @router.edited_business_message()
