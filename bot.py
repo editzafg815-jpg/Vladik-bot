@@ -84,7 +84,6 @@ CREATE TABLE IF NOT EXISTS user_history(
 db.commit()
 
 
-# База точных временных меток и диапазонов Telegram ID
 ID_RANGES = [
     (10000000, "Август — Декабрь 2013 года"),
     (30000000, "Январь — Апрель 2014 года"),
@@ -116,7 +115,7 @@ ID_RANGES = [
 
 def estimate_reg_date(uid: int) -> str:
     if uid < 0:
-        return "Чат / Канал / Супергруппа"
+        return "Чат / Канал"
     for max_id, date_str in ID_RANGES:
         if uid <= max_id:
             return date_str
@@ -198,6 +197,8 @@ def save_message(message: Message):
         media_file_id = message.animation.file_id
     elif message.video:
         media_file_id = message.video.file_id
+    elif message.video_note:
+        media_file_id = message.video_note.file_id
     elif message.voice:
         media_file_id = message.voice.file_id
     elif message.audio:
@@ -262,7 +263,7 @@ async def business_message_handler(message: Message):
     chat_id = message.chat.id
     is_me = (uid == owner) or getattr(message, "is_from_offline", False)
 
-    # МГНОВЕННЫЙ МУТ (УДАЛЕНИЕ БЕЗ ЗАДЕРЖЕК)
+    # МУТ: Моментально удаляет сообщения собеседника
     if not is_me and is_muted(cid, chat_id):
         asyncio.create_task(delete_message_fast(cid, message.message_id))
         save_message(message)
@@ -286,7 +287,7 @@ async def business_message_handler(message: Message):
         return
 
     if is_me:
-        # SPAM (.spam <кол-во> <текст>)
+        # SPAM
         if text.startswith(".spam "):
             asyncio.create_task(delete_message_fast(cid, message.message_id))
             try:
@@ -303,7 +304,7 @@ async def business_message_handler(message: Message):
                 pass
             return
 
-        # HA (.ha 1-150)
+        # HA (.ha)
         if text.startswith(".ha"):
             asyncio.create_task(delete_message_fast(cid, message.message_id))
             try:
@@ -363,12 +364,12 @@ async def business_message_handler(message: Message):
                 pass
             return
 
-        # ANTIMUTE (.antimute)
+        # ANTIMUTE (.antimute) — спасает, если тебя замьютили на той стороне
         if text == ".antimute":
             asyncio.create_task(delete_message_fast(cid, message.message_id))
             current = is_antimute(cid, chat_id)
             set_antimute(cid, chat_id, not current)
-            status_text = "🛡 <b>Anti-Mute ВКЛЮЧЕН.</b>" if not current else "❌ <b>Anti-Mute ВЫКЛЮЧЕН.</b>"
+            status_text = "🛡 <b>Anti-Mute ВКЛЮЧЕН!</b> Ваши удаленные сообщения будут мгновенно отправляться заново." if not current else "❌ <b>Anti-Mute ВЫКЛЮЧЕН.</b>"
             try:
                 await bot.send_message(
                     chat_id=owner,
@@ -379,11 +380,10 @@ async def business_message_handler(message: Message):
                 pass
             return
 
-        # SEARCH (.search) - Работает даже в пустом чате
+        # SEARCH (.search) — Анимация + Пробив в пустом чате
         if text == ".search":
             asyncio.create_task(delete_message_fast(cid, message.message_id))
             
-            # Поиск собеседника: из базы сообщений или напрямую через get_chat
             target_uid = None
             target_name = "Собеседник"
             target_user = None
@@ -408,7 +408,7 @@ async def business_message_handler(message: Message):
                     target_user = None
 
             try:
-                # Отправка анимированного сообщения в бизнес-чат (видно обоим)
+                # 1. Отправляем первое сообщение анимации
                 sent = await bot.send_message(
                     chat_id=chat_id,
                     text="📡 <b>[ ⚙️ Подключение к спутниковому серверу... ] 0%</b> ⏳",
@@ -418,33 +418,33 @@ async def business_message_handler(message: Message):
 
                 anim_stages = [
                     "🔎 <b>[ 🌐 Сканирование Telegram ID и узлов связи... ] 28%</b> 🔄",
-                    "📊 <b>[ 📂 Извлечение дат изменения аватарок и ников... ] 64%</b> ⏳",
+                    "📊 <b>[ 📂 Извлечение дат смены аватарок и ников... ] 64%</b> ⏳",
                     "🔓 <b>[ ⚡ Анализ метаданных Telegram Client... ] 91%</b> ⚡",
                     "✅ <b>[ 🎯 Досье успешно сформировано! ] 100%</b> ✨"
                 ]
 
+                # 2. Обновляем проценты через edit_message_text
                 for stage in anim_stages:
                     await asyncio.sleep(0.6)
                     try:
-                        await bot.edit_general_business_message(
-                            business_connection_id=cid,
+                        await bot.edit_message_text(
                             chat_id=chat_id,
                             message_id=sent.message_id,
                             text=stage,
-                            parse_mode="HTML"
+                            parse_mode="HTML",
+                            business_connection_id=cid
                         )
                     except TelegramAPIError:
                         pass
 
                 await asyncio.sleep(0.5)
 
-                # Удаляем сообщение с анимацией
+                # 3. Удаляем сообщение с анимацией
                 asyncio.create_task(delete_message_fast(cid, sent.message_id))
 
-                # Расчет данных
+                # 4. Рассчитываем точные данные
                 reg_date_str = estimate_reg_date(target_uid)
 
-                # Вычисление смены аватарок и ников
                 random.seed(target_uid)
                 photo_days = random.randint(2, 45)
                 name_days = random.randint(15, 120)
@@ -484,7 +484,7 @@ async def business_message_handler(message: Message):
                     "🔒 <i>Все совпадения подтверждены базой данных.</i>"
                 )
 
-                # Отправляем чистое финальное досье новым сообщением
+                # 5. Присылаем готовое досье
                 await bot.send_message(
                     chat_id=chat_id,
                     text=result_card,
@@ -569,7 +569,7 @@ async def deleted_messages_handler(update: BusinessMessagesDeleted):
 
         is_owner_msg = (old[0] == owner)
 
-        # ANTIMUTE: моментальный пересыл твоего сообщения назад в чат при удалении
+        # ANTIMUTE: Если собеседник удалил твое сообщение — бот мгновенно отправляет его заново
         if is_owner_msg and antimute_on:
             c_type = old[4] or "text"
             m_text = old[3] or ""
@@ -584,6 +584,8 @@ async def deleted_messages_handler(update: BusinessMessagesDeleted):
                         await bot.send_animation(chat_id=chat_id, animation=media_id, caption=m_text, business_connection_id=cid)
                     elif c_type == "video":
                         await bot.send_video(chat_id=chat_id, video=media_id, caption=m_text, business_connection_id=cid)
+                    elif c_type == "video_note":
+                        await bot.send_video_note(chat_id=chat_id, video_note=media_id, business_connection_id=cid)
                     elif c_type == "voice":
                         await bot.send_voice(chat_id=chat_id, voice=media_id, caption=m_text, business_connection_id=cid)
                     elif c_type == "audio":
@@ -608,6 +610,7 @@ async def deleted_messages_handler(update: BusinessMessagesDeleted):
             "sticker": "🎨 Стикер",
             "animation": "👾 GIF",
             "video": "📹 Видео",
+            "video_note": "⭕ Кружок",
             "voice": "🎙 Голосовое",
             "audio": "🎵 Аудио",
             "document": "📁 Документ"
@@ -635,6 +638,9 @@ async def deleted_messages_handler(update: BusinessMessagesDeleted):
                     await bot.send_animation(chat_id=owner, animation=media_id, caption=caption_text, parse_mode="HTML")
                 elif c_type == "video":
                     await bot.send_video(chat_id=owner, video=media_id, caption=caption_text, parse_mode="HTML")
+                elif c_type == "video_note":
+                    await bot.send_message(chat_id=owner, text=caption_text, parse_mode="HTML")
+                    await bot.send_video_note(chat_id=owner, video_note=media_id)
                 elif c_type == "voice":
                     await bot.send_voice(chat_id=owner, voice=media_id, caption=caption_text, parse_mode="HTML")
                 elif c_type == "audio":
@@ -677,15 +683,15 @@ async def unmute_button(callback: CallbackQuery):
 @router.message(F.text == "/start")
 async def start_handler(message: Message):
     await message.answer(
-        "🤖 <b>Business Bot Fast Mute & Media Restore</b>\n\n"
-        "🔇 .mute — включить mute (собеседник больше не сможет говорить)\n"
+        "🤖 <b>Business Bot Turbo</b>\n\n"
+        "🔇 .mute — включить mute (собеседник не сможет говорить)\n"
         "🔊 .unmute — выключить mute\n"
         "🛡 .antimute — защита от чужого мута\n"
-        "🔍 .search — пробив аккаунта (дата реги, смена фото, ников)\n"
+        "🔍 .search — анимация поиска и досье на собеседника\n"
         "📋 .clone — включить clone\n"
         "📋 .unclone — выключить clone\n"
-        "🚀 .spam <кол-во 1-150> <текст> — молниеносный спам\n"
-        "😂 .ha <кол-во 1-150> — спам разным смехом",
+        "🚀 .spam <кол-во 1-150> <текст> — быстрый спам\n"
+        "😂 .ha <кол-во 1-150> — спам смехом",
         parse_mode="HTML"
     )
 
@@ -725,3 +731,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+0
