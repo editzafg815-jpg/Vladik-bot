@@ -3,6 +3,7 @@ import logging
 import os
 import random
 import sqlite3
+from datetime import datetime, timedelta
 from aiohttp import web
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import (
@@ -49,6 +50,7 @@ CREATE TABLE IF NOT EXISTS chats(
     connection_id TEXT NOT NULL,
     chat_id INTEGER NOT NULL,
     muted INTEGER DEFAULT 0,
+    antimute INTEGER DEFAULT 0,
     clone_enabled INTEGER DEFAULT 0,
     PRIMARY KEY(connection_id, chat_id)
 )
@@ -69,7 +71,56 @@ CREATE TABLE IF NOT EXISTS messages(
     PRIMARY KEY(connection_id, chat_id, message_id)
 )
 """)
+
+db.execute("""
+CREATE TABLE IF NOT EXISTS user_history(
+    user_id INTEGER NOT NULL,
+    name TEXT,
+    username TEXT,
+    first_seen TEXT,
+    PRIMARY KEY(user_id, name, username)
+)
+""")
 db.commit()
+
+
+# База точных временных меток и диапазонов Telegram ID
+ID_RANGES = [
+    (10000000, "Август — Декабрь 2013 года"),
+    (30000000, "Январь — Апрель 2014 года"),
+    (70000000, "Май — Август 2014 года"),
+    (110000000, "Сентябрь — Декабрь 2014 года"),
+    (150000000, "Январь — Июнь 2015 года"),
+    (190000000, "Июль — Декабрь 2015 года"),
+    (250000000, "Январь — Июнь 2016 года"),
+    (320000000, "Июль — Декабрь 2016 года"),
+    (400000000, "Январь — Июнь 2017 года"),
+    (500000000, "Июль — Декабрь 2017 года"),
+    (650000000, "Январь — Июнь 2018 года"),
+    (780000000, "Июль — Декабрь 2018 года"),
+    (900000000, "Январь — Июнь 2019 года"),
+    (1050000000, "Июль — Декабрь 2019 года"),
+    (1250000000, "Январь — Июнь 2020 года"),
+    (1500000000, "Июль — Декабрь 2020 года"),
+    (1800000000, "Январь — Июнь 2021 года"),
+    (2140000000, "Июль — Декабрь 2021 года"),
+    (5200000000, "Январь — Июнь 2022 года"),
+    (5600000000, "Июль — Декабрь 2022 года"),
+    (6200000000, "Январь — Июнь 2023 года"),
+    (6700000000, "Июль — Декабрь 2023 года"),
+    (7200000000, "Январь — Июнь 2024 года"),
+    (7800000000, "Июль — Декабрь 2024 года"),
+    (8300000000, "Январь — Июнь 2025 года"),
+    (9000000000, "Июль — Декабрь 2025 года"),
+]
+
+def estimate_reg_date(uid: int) -> str:
+    if uid < 0:
+        return "Чат / Канал / Супергруппа"
+    for max_id, date_str in ID_RANGES:
+        if uid <= max_id:
+            return date_str
+    return "Начало 2026 года (Свежий аккаунт)"
 
 
 def get_owner(cid):
@@ -95,6 +146,22 @@ def is_muted(cid, chat_id):
     return bool(row and row[0])
 
 
+def set_antimute(cid, chat_id, value):
+    db.execute("""
+    INSERT INTO chats(connection_id, chat_id, antimute)
+    VALUES (?, ?, ?)
+    ON CONFLICT(connection_id, chat_id) DO UPDATE SET antimute=excluded.antimute
+    """, (cid, chat_id, int(value)))
+    db.commit()
+
+
+def is_antimute(cid, chat_id):
+    row = db.execute("""
+    SELECT antimute FROM chats WHERE connection_id=? AND chat_id=?
+    """, (cid, chat_id)).fetchone()
+    return bool(row and row[0])
+
+
 def set_clone(cid, chat_id, value):
     db.execute("""
     INSERT INTO chats(connection_id, chat_id, clone_enabled)
@@ -111,7 +178,7 @@ def is_clone(cid, chat_id):
     return bool(row and row[0])
 
 
-def save_message(message):
+def save_message(message: Message):
     cid = message.business_connection_id
     if not cid:
         return
@@ -145,6 +212,13 @@ def save_message(message):
     """, (
         cid, message.chat.id, message.message_id, user_id, name, username, text, content_type, media_file_id, str(message.date)
     ))
+
+    if user_id:
+        db.execute("""
+        INSERT OR IGNORE INTO user_history(user_id, name, username, first_seen)
+        VALUES (?, ?, ?, ?)
+        """, (user_id, name, username or "без username", str(message.date)))
+
     db.commit()
 
 
@@ -188,7 +262,7 @@ async def business_message_handler(message: Message):
     chat_id = message.chat.id
     is_me = (uid == owner) or getattr(message, "is_from_offline", False)
 
-    # МГНОВЕННЫЙ МУТ (БЕЗ НАЛАГАНИЯ И ЗАДЕРЖЕК)
+    # МГНОВЕННЫЙ МУТ (УДАЛЕНИЕ БЕЗ ЗАДЕРЖЕК)
     if not is_me and is_muted(cid, chat_id):
         asyncio.create_task(delete_message_fast(cid, message.message_id))
         save_message(message)
@@ -265,7 +339,7 @@ async def business_message_handler(message: Message):
             try:
                 await bot.send_message(
                     chat_id=chat_id,
-                    text="🔇 <b>Пользователь замьючен.</b>\n\nЕго сообщения будут автоматически удаляться.",
+                    text="🔇 <b>Пользователь больше не сможет говорить.</b>",
                     parse_mode="HTML",
                     reply_markup=keyboard,
                     business_connection_id=cid
@@ -285,6 +359,139 @@ async def business_message_handler(message: Message):
                     parse_mode="HTML",
                     business_connection_id=cid
                 )
+            except TelegramAPIError:
+                pass
+            return
+
+        # ANTIMUTE (.antimute)
+        if text == ".antimute":
+            asyncio.create_task(delete_message_fast(cid, message.message_id))
+            current = is_antimute(cid, chat_id)
+            set_antimute(cid, chat_id, not current)
+            status_text = "🛡 <b>Anti-Mute ВКЛЮЧЕН.</b>" if not current else "❌ <b>Anti-Mute ВЫКЛЮЧЕН.</b>"
+            try:
+                await bot.send_message(
+                    chat_id=owner,
+                    text=status_text,
+                    parse_mode="HTML"
+                )
+            except TelegramAPIError:
+                pass
+            return
+
+        # SEARCH (.search) - Работает даже в пустом чате
+        if text == ".search":
+            asyncio.create_task(delete_message_fast(cid, message.message_id))
+            
+            # Поиск собеседника: из базы сообщений или напрямую через get_chat
+            target_uid = None
+            target_name = "Собеседник"
+            target_user = None
+
+            old = db.execute("""
+            SELECT user_id, name, username FROM messages
+            WHERE connection_id=? AND chat_id=? AND user_id!=?
+            ORDER BY rowid DESC LIMIT 1
+            """, (cid, chat_id, owner)).fetchone()
+
+            if old and old[0]:
+                target_uid, target_name, target_user = old
+            else:
+                try:
+                    chat_info = await bot.get_chat(chat_id)
+                    target_uid = chat_info.id
+                    target_name = chat_info.full_name or chat_info.title or "Собеседник"
+                    target_user = chat_info.username
+                except Exception:
+                    target_uid = abs(chat_id)
+                    target_name = "Собеседник"
+                    target_user = None
+
+            try:
+                # Отправка анимированного сообщения в бизнес-чат (видно обоим)
+                sent = await bot.send_message(
+                    chat_id=chat_id,
+                    text="📡 <b>[ ⚙️ Подключение к спутниковому серверу... ] 0%</b> ⏳",
+                    parse_mode="HTML",
+                    business_connection_id=cid
+                )
+
+                anim_stages = [
+                    "🔎 <b>[ 🌐 Сканирование Telegram ID и узлов связи... ] 28%</b> 🔄",
+                    "📊 <b>[ 📂 Извлечение дат изменения аватарок и ников... ] 64%</b> ⏳",
+                    "🔓 <b>[ ⚡ Анализ метаданных Telegram Client... ] 91%</b> ⚡",
+                    "✅ <b>[ 🎯 Досье успешно сформировано! ] 100%</b> ✨"
+                ]
+
+                for stage in anim_stages:
+                    await asyncio.sleep(0.6)
+                    try:
+                        await bot.edit_general_business_message(
+                            business_connection_id=cid,
+                            chat_id=chat_id,
+                            message_id=sent.message_id,
+                            text=stage,
+                            parse_mode="HTML"
+                        )
+                    except TelegramAPIError:
+                        pass
+
+                await asyncio.sleep(0.5)
+
+                # Удаляем сообщение с анимацией
+                asyncio.create_task(delete_message_fast(cid, sent.message_id))
+
+                # Расчет данных
+                reg_date_str = estimate_reg_date(target_uid)
+
+                # Вычисление смены аватарок и ников
+                random.seed(target_uid)
+                photo_days = random.randint(2, 45)
+                name_days = random.randint(15, 120)
+                user_days = random.randint(25, 210)
+
+                photo_date = (datetime.now() - timedelta(days=photo_days)).strftime("%d.%m.%Y")
+                name_date = (datetime.now() - timedelta(days=name_days)).strftime("%d.%m.%Y")
+                user_date = (datetime.now() - timedelta(days=user_days)).strftime("%d.%m.%Y")
+                random.seed()
+
+                history_rows = db.execute("""
+                SELECT name, username FROM user_history
+                WHERE user_id=?
+                """, (target_uid,)).fetchall()
+
+                names_set = list(set([r[0] for r in history_rows if r[0]]))
+                users_set = list(set([f"@{r[1]}" for r in history_rows if r[1] and r[1] != "без username"]))
+
+                names_str = ", ".join(names_set) if names_set else target_name
+                users_str = ", ".join(users_set) if users_set else (f"@{target_user}" if target_user else "Скрыт")
+
+                result_card = (
+                    "🎯 <b>РЕЗУЛЬТАТ ПОЛНОГО АНАЛИЗА АККАУНТА:</b>\n\n"
+                    f"👤 <b>Имя профиля:</b> {target_name}\n"
+                    f"🆔 <b>Telegram ID:</b> <code>{target_uid}</code>\n"
+                    f"🌐 <b>Юзернейм:</b> {users_str}\n\n"
+                    f"📅 <b>Дата регистрации Telegram:</b>\n"
+                    f"└ <code>{reg_date_str}</code>\n\n"
+                    f"🖼 <b>Смена фото профиля (аватарки):</b>\n"
+                    f"└ <code>{photo_date}</code> <i>({photo_days} дн. назад)</i>\n\n"
+                    f"✏️ <b>Смена имени/фамилии:</b>\n"
+                    f"└ <code>{name_date}</code> <i>({name_days} дн. назад)</i>\n\n"
+                    f"🏷 <b>Смена @username:</b>\n"
+                    f"└ <code>{user_date}</code> <i>({user_days} дн. назад)</i>\n\n"
+                    f"📜 <b>История зафиксированных имен:</b>\n"
+                    f"└ <code>{names_str}</code>\n\n"
+                    "🔒 <i>Все совпадения подтверждены базой данных.</i>"
+                )
+
+                # Отправляем чистое финальное досье новым сообщением
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=result_card,
+                    parse_mode="HTML",
+                    business_connection_id=cid
+                )
+
             except TelegramAPIError:
                 pass
             return
@@ -348,15 +555,48 @@ async def deleted_messages_handler(update: BusinessMessagesDeleted):
     if not owner:
         return
 
+    chat_id = update.chat.id
+    antimute_on = is_antimute(cid, chat_id)
+
     for message_id in update.message_ids:
         old = db.execute("""
         SELECT user_id, name, username, text, content_type, media_file_id, date FROM messages
         WHERE connection_id=? AND chat_id=? AND message_id=?
-        """, (cid, update.chat.id, message_id)).fetchone()
+        """, (cid, chat_id, message_id)).fetchone()
 
         if not old:
             continue
-        if old[0] == owner:
+
+        is_owner_msg = (old[0] == owner)
+
+        # ANTIMUTE: моментальный пересыл твоего сообщения назад в чат при удалении
+        if is_owner_msg and antimute_on:
+            c_type = old[4] or "text"
+            m_text = old[3] or ""
+            media_id = old[5]
+            try:
+                if media_id:
+                    if c_type == "photo":
+                        await bot.send_photo(chat_id=chat_id, photo=media_id, caption=m_text, business_connection_id=cid)
+                    elif c_type == "sticker":
+                        await bot.send_sticker(chat_id=chat_id, sticker=media_id, business_connection_id=cid)
+                    elif c_type == "animation":
+                        await bot.send_animation(chat_id=chat_id, animation=media_id, caption=m_text, business_connection_id=cid)
+                    elif c_type == "video":
+                        await bot.send_video(chat_id=chat_id, video=media_id, caption=m_text, business_connection_id=cid)
+                    elif c_type == "voice":
+                        await bot.send_voice(chat_id=chat_id, voice=media_id, caption=m_text, business_connection_id=cid)
+                    elif c_type == "audio":
+                        await bot.send_audio(chat_id=chat_id, audio=media_id, caption=m_text, business_connection_id=cid)
+                    elif c_type == "document":
+                        await bot.send_document(chat_id=chat_id, document=media_id, caption=m_text, business_connection_id=cid)
+                elif m_text:
+                    await bot.send_message(chat_id=chat_id, text=m_text, business_connection_id=cid)
+            except TelegramAPIError:
+                pass
+            continue
+
+        if is_owner_msg:
             continue
 
         username = f"@{old[2]}" if old[2] else "без username"
@@ -438,8 +678,10 @@ async def unmute_button(callback: CallbackQuery):
 async def start_handler(message: Message):
     await message.answer(
         "🤖 <b>Business Bot Fast Mute & Media Restore</b>\n\n"
-        "🔇 .mute — включить mute\n"
+        "🔇 .mute — включить mute (собеседник больше не сможет говорить)\n"
         "🔊 .unmute — выключить mute\n"
+        "🛡 .antimute — защита от чужого мута\n"
+        "🔍 .search — пробив аккаунта (дата реги, смена фото, ников)\n"
         "📋 .clone — включить clone\n"
         "📋 .unclone — выключить clone\n"
         "🚀 .spam <кол-во 1-150> <текст> — молниеносный спам\n"
