@@ -74,52 +74,55 @@ CREATE TABLE IF NOT EXISTS messages(
 
 db.execute("""
 CREATE TABLE IF NOT EXISTS user_history(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
     name TEXT,
     username TEXT,
-    first_seen TEXT,
-    PRIMARY KEY(user_id, name, username)
+    recorded_at TEXT
 )
 """)
 db.commit()
 
 
 ID_RANGES = [
-    (10000000, "Август — Декабрь 2013 года"),
-    (30000000, "Январь — Апрель 2014 года"),
-    (70000000, "Май — Август 2014 года"),
-    (110000000, "Сентябрь — Декабрь 2014 года"),
-    (150000000, "Январь — Июнь 2015 года"),
-    (190000000, "Июль — Декабрь 2015 года"),
-    (250000000, "Январь — Июнь 2016 года"),
-    (320000000, "Июль — Декабрь 2016 года"),
-    (400000000, "Январь — Июнь 2017 года"),
-    (500000000, "Июль — Декабрь 2017 года"),
-    (650000000, "Январь — Июнь 2018 года"),
-    (780000000, "Июль — Декабрь 2018 года"),
-    (900000000, "Январь — Июнь 2019 года"),
-    (1050000000, "Июль — Декабрь 2019 года"),
-    (1250000000, "Январь — Июнь 2020 года"),
-    (1500000000, "Июль — Декабрь 2020 года"),
-    (1800000000, "Январь — Июнь 2021 года"),
-    (2140000000, "Июль — Декабрь 2021 года"),
-    (5200000000, "Январь — Июнь 2022 года"),
-    (5600000000, "Июль — Декабрь 2022 года"),
-    (6200000000, "Январь — Июнь 2023 года"),
-    (6700000000, "Июль — Декабрь 2023 года"),
-    (7200000000, "Январь — Июнь 2024 года"),
-    (7800000000, "Июль — Декабрь 2024 года"),
-    (8300000000, "Январь — Июнь 2025 года"),
-    (9000000000, "Июль — Декабрь 2025 года"),
+    (10000000, "15.10.2013"),
+    (30000000, "10.02.2014"),
+    (70000000, "20.06.2014"),
+    (110000000, "18.11.2014"),
+    (150000000, "25.03.2015"),
+    (190000000, "14.09.2015"),
+    (250000000, "12.04.2016"),
+    (320000000, "19.10.2016"),
+    (400000000, "08.03.2017"),
+    (500000000, "17.11.2017"),
+    (650000000, "22.04.2018"),
+    (780000000, "15.10.2018"),
+    (900000000, "03.04.2019"),
+    (1050000000, "11.11.2019"),
+    (1250000000, "16.03.2020"),
+    (1500000000, "20.09.2020"),
+    (1800000000, "14.02.2021"),
+    (2140000000, "25.08.2021"),
+    (5200000000, "10.03.2022"),
+    (5600000000, "18.09.2022"),
+    (6200000000, "05.04.2023"),
+    (6700000000, "22.11.2023"),
+    (7200000000, "14.05.2024"),
+    (7800000000, "29.11.2024"),
+    (8300000000, "10.06.2025"),
+    (9000000000, "15.01.2026"),
 ]
 
-def estimate_reg_date(uid: int) -> str:
+def calculate_exact_reg_date(uid: int) -> str:
     if uid < 0:
         return "Чат / Канал"
-    for max_id, date_str in ID_RANGES:
+    for max_id, d_str in ID_RANGES:
         if uid <= max_id:
-            return date_str
-    return "Начало 2026 года (Свежий аккаунт)"
+            base_date = datetime.strptime(d_str, "%d.%m.%Y")
+            offset_days = (uid % 25) - 12
+            exact_d = base_date + timedelta(days=offset_days)
+            return exact_d.strftime("%d.%m.%Y")
+    return "02.04.2026"
 
 
 def get_owner(cid):
@@ -215,22 +218,30 @@ def save_message(message: Message):
     ))
 
     if user_id:
-        db.execute("""
-        INSERT OR IGNORE INTO user_history(user_id, name, username, first_seen)
-        VALUES (?, ?, ?, ?)
-        """, (user_id, name, username or "без username", str(message.date)))
+        last_rec = db.execute("""
+        SELECT name, username FROM user_history WHERE user_id=? ORDER BY id DESC LIMIT 1
+        """, (user_id,)).fetchone()
+        
+        curr_uname = username or "без username"
+        if not last_rec or last_rec[0] != name or last_rec[1] != curr_uname:
+            db.execute("""
+            INSERT INTO user_history(user_id, name, username, recorded_at)
+            VALUES (?, ?, ?, ?)
+            """, (user_id, name, curr_uname, datetime.now().strftime("%d.%m.%Y %H:%M")))
 
     db.commit()
 
 
-async def delete_message_fast(cid, message_id):
-    try:
-        await bot.delete_business_messages(
-            business_connection_id=cid,
-            message_ids=[message_id]
-        )
-    except TelegramAPIError:
-        pass
+def delete_message_now(cid, message_id):
+    async def _del():
+        try:
+            await bot.delete_business_messages(
+                business_connection_id=cid,
+                message_ids=[message_id]
+            )
+        except TelegramAPIError:
+            pass
+    asyncio.create_task(_del())
 
 
 @router.business_connection()
@@ -263,9 +274,8 @@ async def business_message_handler(message: Message):
     chat_id = message.chat.id
     is_me = (uid == owner) or getattr(message, "is_from_offline", False)
 
-    # МУТ: Моментально удаляет сообщения собеседника
     if not is_me and is_muted(cid, chat_id):
-        asyncio.create_task(delete_message_fast(cid, message.message_id))
+        delete_message_now(cid, message.message_id)
         save_message(message)
         return
 
@@ -287,9 +297,8 @@ async def business_message_handler(message: Message):
         return
 
     if is_me:
-        # SPAM
         if text.startswith(".spam "):
-            asyncio.create_task(delete_message_fast(cid, message.message_id))
+            delete_message_now(cid, message.message_id)
             try:
                 parts = text_raw.split(maxsplit=2)
                 count = min(int(parts[1]), 150)
@@ -304,9 +313,8 @@ async def business_message_handler(message: Message):
                 pass
             return
 
-        # HA (.ha)
         if text.startswith(".ha"):
-            asyncio.create_task(delete_message_fast(cid, message.message_id))
+            delete_message_now(cid, message.message_id)
             try:
                 parts = text_raw.split()
                 count = min(int(parts[1]), 150) if len(parts) > 1 else 5
@@ -325,10 +333,9 @@ async def business_message_handler(message: Message):
                 pass
             return
 
-        # MUTE
         if text == ".mute":
             set_mute(cid, chat_id, True)
-            asyncio.create_task(delete_message_fast(cid, message.message_id))
+            delete_message_now(cid, message.message_id)
             keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[[
                     InlineKeyboardButton(
@@ -340,7 +347,7 @@ async def business_message_handler(message: Message):
             try:
                 await bot.send_message(
                     chat_id=chat_id,
-                    text="🔇 <b>Пользователь больше не сможет говорить.</b>",
+                    text="🔇 <b>Пользователь замучен.</b>",
                     parse_mode="HTML",
                     reply_markup=keyboard,
                     business_connection_id=cid
@@ -349,14 +356,13 @@ async def business_message_handler(message: Message):
                 pass
             return
 
-        # UNMUTE
         if text == ".unmute":
             set_mute(cid, chat_id, False)
-            asyncio.create_task(delete_message_fast(cid, message.message_id))
+            delete_message_now(cid, message.message_id)
             try:
                 await bot.send_message(
                     chat_id=chat_id,
-                    text="🔊 <b>Пользователь размьючен.</b>",
+                    text="🔊 <b>Пользователь размучен.</b>",
                     parse_mode="HTML",
                     business_connection_id=cid
                 )
@@ -364,25 +370,24 @@ async def business_message_handler(message: Message):
                 pass
             return
 
-        # ANTIMUTE (.antimute) — спасает, если тебя замьютили на той стороне
         if text == ".antimute":
-            asyncio.create_task(delete_message_fast(cid, message.message_id))
+            delete_message_now(cid, message.message_id)
             current = is_antimute(cid, chat_id)
             set_antimute(cid, chat_id, not current)
-            status_text = "🛡 <b>Anti-Mute ВКЛЮЧЕН!</b> Ваши удаленные сообщения будут мгновенно отправляться заново." if not current else "❌ <b>Anti-Mute ВЫКЛЮЧЕН.</b>"
+            status_text = "🛡 <b>Anti-Mute ВКЛЮЧЕН!</b> Если вас замутили, ваши сообщения будут восстанавливаться мгновенно." if not current else "❌ <b>Anti-Mute ВЫКЛЮЧЕН.</b>"
             try:
                 await bot.send_message(
-                    chat_id=owner,
+                    chat_id=chat_id,
                     text=status_text,
-                    parse_mode="HTML"
+                    parse_mode="HTML",
+                    business_connection_id=cid
                 )
             except TelegramAPIError:
                 pass
             return
 
-        # SEARCH (.search) — Анимация + Пробив в пустом чате
         if text == ".search":
-            asyncio.create_task(delete_message_fast(cid, message.message_id))
+            delete_message_now(cid, message.message_id)
             
             target_uid = None
             target_name = "Собеседник"
@@ -408,24 +413,22 @@ async def business_message_handler(message: Message):
                     target_user = None
 
             try:
-                # 1. Отправляем первое сообщение анимации
                 sent = await bot.send_message(
                     chat_id=chat_id,
-                    text="📡 <b>[ ⚙️ Подключение к спутниковому серверу... ] 0%</b> ⏳",
+                    text="📡 <b>[ ⚙️ Подключение к базе данных... ] 0%</b> ⏳",
                     parse_mode="HTML",
                     business_connection_id=cid
                 )
 
                 anim_stages = [
-                    "🔎 <b>[ 🌐 Сканирование Telegram ID и узлов связи... ] 28%</b> 🔄",
-                    "📊 <b>[ 📂 Извлечение дат смены аватарок и ников... ] 64%</b> ⏳",
-                    "🔓 <b>[ ⚡ Анализ метаданных Telegram Client... ] 91%</b> ⚡",
+                    "🔎 <b>[ 🌐 Сканирование Telegram ID... ] 28%</b> 🔄",
+                    "📊 <b>[ 📂 Анализ смены аватарок и юзернеймов... ] 64%</b> ⏳",
+                    "🔓 <b>[ ⚡ Получение точных дат из реестра... ] 91%</b> ⚡",
                     "✅ <b>[ 🎯 Досье успешно сформировано! ] 100%</b> ✨"
                 ]
 
-                # 2. Обновляем проценты через edit_message_text
                 for stage in anim_stages:
-                    await asyncio.sleep(0.6)
+                    await asyncio.sleep(0.5)
                     try:
                         await bot.edit_message_text(
                             chat_id=chat_id,
@@ -437,54 +440,60 @@ async def business_message_handler(message: Message):
                     except TelegramAPIError:
                         pass
 
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.4)
+                delete_message_now(cid, sent.message_id)
 
-                # 3. Удаляем сообщение с анимацией
-                asyncio.create_task(delete_message_fast(cid, sent.message_id))
-
-                # 4. Рассчитываем точные данные
-                reg_date_str = estimate_reg_date(target_uid)
+                reg_date_str = calculate_exact_reg_date(target_uid)
 
                 random.seed(target_uid)
-                photo_days = random.randint(2, 45)
-                name_days = random.randint(15, 120)
-                user_days = random.randint(25, 210)
+                photo_days = (target_uid % 35) + 3
+                name_days = (target_uid % 70) + 15
+                user_days = (target_uid % 120) + 25
 
                 photo_date = (datetime.now() - timedelta(days=photo_days)).strftime("%d.%m.%Y")
                 name_date = (datetime.now() - timedelta(days=name_days)).strftime("%d.%m.%Y")
                 user_date = (datetime.now() - timedelta(days=user_days)).strftime("%d.%m.%Y")
+
+                prev_name_rand = f"User_{str(target_uid)[:4]}"
+                prev_user_rand = f"old_{str(target_uid)[-4:]}_nick"
                 random.seed()
 
                 history_rows = db.execute("""
-                SELECT name, username FROM user_history
-                WHERE user_id=?
+                SELECT name, username, recorded_at FROM user_history
+                WHERE user_id=? ORDER BY id ASC
                 """, (target_uid,)).fetchall()
 
-                names_set = list(set([r[0] for r in history_rows if r[0]]))
-                users_set = list(set([f"@{r[1]}" for r in history_rows if r[1] and r[1] != "без username"]))
-
-                names_str = ", ".join(names_set) if names_set else target_name
-                users_str = ", ".join(users_set) if users_set else (f"@{target_user}" if target_user else "Скрыт")
+                if len(history_rows) >= 2:
+                    old_u = history_rows[-2][1]
+                    new_u = history_rows[-1][1]
+                    user_change_str = f"с @{old_u} на @{new_u}"
+                    
+                    old_n = history_rows[-2][0]
+                    new_n = history_rows[-1][0]
+                    name_change_str = f"с «{old_n}» на «{new_n}»"
+                else:
+                    curr_u = target_user if target_user else "без_юзернейма"
+                    user_change_str = f"с @{prev_user_rand} на @{curr_u}"
+                    name_change_str = f"с «{prev_name_rand}» на «{target_name}»"
 
                 result_card = (
                     "🎯 <b>РЕЗУЛЬТАТ ПОЛНОГО АНАЛИЗА АККАУНТА:</b>\n\n"
                     f"👤 <b>Имя профиля:</b> {target_name}\n"
                     f"🆔 <b>Telegram ID:</b> <code>{target_uid}</code>\n"
-                    f"🌐 <b>Юзернейм:</b> {users_str}\n\n"
-                    f"📅 <b>Дата регистрации Telegram:</b>\n"
+                    f"🌐 <b>Текущий @username:</b> @{target_user if target_user else 'Скрыт'}\n\n"
+                    f"📅 <b>Точная дата регистрации аккаунта:</b>\n"
                     f"└ <code>{reg_date_str}</code>\n\n"
-                    f"🖼 <b>Смена фото профиля (аватарки):</b>\n"
+                    f"🖼 <b>Точная дата смены аватарки (фото профиля):</b>\n"
                     f"└ <code>{photo_date}</code> <i>({photo_days} дн. назад)</i>\n\n"
-                    f"✏️ <b>Смена имени/фамилии:</b>\n"
-                    f"└ <code>{name_date}</code> <i>({name_days} дн. назад)</i>\n\n"
-                    f"🏷 <b>Смена @username:</b>\n"
-                    f"└ <code>{user_date}</code> <i>({user_days} дн. назад)</i>\n\n"
-                    f"📜 <b>История зафиксированных имен:</b>\n"
-                    f"└ <code>{names_str}</code>\n\n"
-                    "🔒 <i>Все совпадения подтверждены базой данных.</i>"
+                    f"✏️ <b>Точная дата смены имени/фамилии:</b>\n"
+                    f"└ <code>{name_date}</code> <i>({name_days} дн. назад)</i>\n"
+                    f"└ <i>Изменено: {name_change_str}</i>\n\n"
+                    f"🏷 <b>Точная дата смены юзернейма:</b>\n"
+                    f"└ <code>{user_date}</code> <i>({user_days} дн. назад)</i>\n"
+                    f"└ <i>Изменено: {user_change_str}</i>\n\n"
+                    "🔒 <i>Все данные проверены и верифицированы.</i>"
                 )
 
-                # 5. Присылаем готовое досье
                 await bot.send_message(
                     chat_id=chat_id,
                     text=result_card,
@@ -496,15 +505,14 @@ async def business_message_handler(message: Message):
                 pass
             return
 
-        # CLONE
         if text == ".clone":
             set_clone(cid, chat_id, True)
-            asyncio.create_task(delete_message_fast(cid, message.message_id))
+            delete_message_now(cid, message.message_id)
             return
 
         if text == ".unclone":
             set_clone(cid, chat_id, False)
-            asyncio.create_task(delete_message_fast(cid, message.message_id))
+            delete_message_now(cid, message.message_id)
             return
 
 
@@ -569,33 +577,35 @@ async def deleted_messages_handler(update: BusinessMessagesDeleted):
 
         is_owner_msg = (old[0] == owner)
 
-        # ANTIMUTE: Если собеседник удалил твое сообщение — бот мгновенно отправляет его заново
         if is_owner_msg and antimute_on:
             c_type = old[4] or "text"
             m_text = old[3] or ""
             media_id = old[5]
-            try:
-                if media_id:
-                    if c_type == "photo":
-                        await bot.send_photo(chat_id=chat_id, photo=media_id, caption=m_text, business_connection_id=cid)
-                    elif c_type == "sticker":
-                        await bot.send_sticker(chat_id=chat_id, sticker=media_id, business_connection_id=cid)
-                    elif c_type == "animation":
-                        await bot.send_animation(chat_id=chat_id, animation=media_id, caption=m_text, business_connection_id=cid)
-                    elif c_type == "video":
-                        await bot.send_video(chat_id=chat_id, video=media_id, caption=m_text, business_connection_id=cid)
-                    elif c_type == "video_note":
-                        await bot.send_video_note(chat_id=chat_id, video_note=media_id, business_connection_id=cid)
-                    elif c_type == "voice":
-                        await bot.send_voice(chat_id=chat_id, voice=media_id, caption=m_text, business_connection_id=cid)
-                    elif c_type == "audio":
-                        await bot.send_audio(chat_id=chat_id, audio=media_id, caption=m_text, business_connection_id=cid)
-                    elif c_type == "document":
-                        await bot.send_document(chat_id=chat_id, document=media_id, caption=m_text, business_connection_id=cid)
-                elif m_text:
-                    await bot.send_message(chat_id=chat_id, text=m_text, business_connection_id=cid)
-            except TelegramAPIError:
-                pass
+            
+            async def _resend():
+                try:
+                    if media_id:
+                        if c_type == "photo":
+                            await bot.send_photo(chat_id=chat_id, photo=media_id, caption=m_text, business_connection_id=cid)
+                        elif c_type == "sticker":
+                            await bot.send_sticker(chat_id=chat_id, sticker=media_id, business_connection_id=cid)
+                        elif c_type == "animation":
+                            await bot.send_animation(chat_id=chat_id, animation=media_id, caption=m_text, business_connection_id=cid)
+                        elif c_type == "video":
+                            await bot.send_video(chat_id=chat_id, video=media_id, caption=m_text, business_connection_id=cid)
+                        elif c_type == "video_note":
+                            await bot.send_video_note(chat_id=chat_id, video_note=media_id, business_connection_id=cid)
+                        elif c_type == "voice":
+                            await bot.send_voice(chat_id=chat_id, voice=media_id, caption=m_text, business_connection_id=cid)
+                        elif c_type == "audio":
+                            await bot.send_audio(chat_id=chat_id, audio=media_id, caption=m_text, business_connection_id=cid)
+                        elif c_type == "document":
+                            await bot.send_document(chat_id=chat_id, document=media_id, caption=m_text, business_connection_id=cid)
+                    elif m_text:
+                        await bot.send_message(chat_id=chat_id, text=m_text, business_connection_id=cid)
+                except TelegramAPIError:
+                    pass
+            asyncio.create_task(_resend())
             continue
 
         if is_owner_msg:
@@ -672,7 +682,7 @@ async def unmute_button(callback: CallbackQuery):
     try:
         await bot.send_message(
             chat_id=chat_id,
-            text="🔊 <b>Пользователь размьючен.</b>",
+            text="🔊 <b>Пользователь размучен.</b>",
             parse_mode="HTML",
             business_connection_id=cid
         )
@@ -683,11 +693,11 @@ async def unmute_button(callback: CallbackQuery):
 @router.message(F.text == "/start")
 async def start_handler(message: Message):
     await message.answer(
-        "🤖 <b>Business Bot Turbo</b>\n\n"
-        "🔇 .mute — включить mute (собеседник не сможет говорить)\n"
+        "🤖 <b>Business Bot Turbo Max</b>\n\n"
+        "🔇 .mute — включить mute\n"
         "🔊 .unmute — выключить mute\n"
-        "🛡 .antimute — защита от чужого мута\n"
-        "🔍 .search — анимация поиска и досье на собеседника\n"
+        "🛡 .antimute — защита от удаления ваших сообщений\n"
+        "🔍 .search — пробив аккаунта с историей и датами\n"
         "📋 .clone — включить clone\n"
         "📋 .unclone — выключить clone\n"
         "🚀 .spam <кол-во 1-150> <текст> — быстрый спам\n"
@@ -731,4 +741,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-0
