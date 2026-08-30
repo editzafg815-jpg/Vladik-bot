@@ -2,7 +2,6 @@ import asyncio
 import logging
 import os
 import sqlite3
-from datetime import datetime
 from aiohttp import web
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import (
@@ -15,7 +14,12 @@ from aiogram.types import (
 )
 from aiogram.exceptions import TelegramAPIError
 
+# =========================================================
+# ВСТАВЬ СЮДА ТОКЕН БОТА
+# =========================================================
 BOT_TOKEN = "8698964419:AAHz4Hb25lkTbzQDebt_f1vq5PiNhbbxc5g"
+# =========================================================
+
 DB_FILE = "business_bot.db"
 
 logging.basicConfig(
@@ -63,15 +67,6 @@ CREATE TABLE IF NOT EXISTS messages(
     media_file_id TEXT,
     date TEXT,
     PRIMARY KEY(connection_id, chat_id, message_id)
-)
-""")
-
-db.execute("""
-CREATE TABLE IF NOT EXISTS name_history(
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    name TEXT NOT NULL,
-    changed_at TEXT NOT NULL
 )
 """)
 db.commit()
@@ -168,32 +163,20 @@ def save_message(message: Message):
     """, (
         cid, message.chat.id, message.message_id, user_id, name, username, text, content_type, media_file_id, str(message.date)
     ))
-
-    if user_id:
-        last_rec = db.execute("""
-        SELECT name FROM name_history WHERE user_id=? ORDER BY id DESC LIMIT 1
-        """, (user_id,)).fetchone()
-        
-        if not last_rec or last_rec[0] != name:
-            db.execute("""
-            INSERT INTO name_history(user_id, name, changed_at)
-            VALUES (?, ?, ?)
-            """, (user_id, name, datetime.now().strftime("%d.%m.%Y %H:%M:%S")))
-
     db.commit()
 
 
-def delete_message_fast(cid, message_id):
-    try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(
-            bot.delete_business_messages(
+# Максимально быстрое фоновое удаление без ожиданий
+def delete_fast(cid, message_id):
+    async def _del():
+        try:
+            await bot.delete_business_messages(
                 business_connection_id=cid,
                 message_ids=[message_id]
             )
-        )
-    except Exception:
-        pass
+        except TelegramAPIError:
+            pass
+    asyncio.create_task(_del())
 
 
 @router.business_connection()
@@ -226,8 +209,9 @@ async def business_message_handler(message: Message):
     chat_id = message.chat.id
     is_me = (uid == owner) or getattr(message, "is_from_offline", False)
 
+    # Если включен МУТ — стираем мгновенно
     if not is_me and is_muted(cid, chat_id):
-        delete_message_fast(cid, message.message_id)
+        delete_fast(cid, message.message_id)
         save_message(message)
         return
 
@@ -250,7 +234,7 @@ async def business_message_handler(message: Message):
 
     if is_me:
         if text.startswith(".spam "):
-            delete_message_fast(cid, message.message_id)
+            delete_fast(cid, message.message_id)
             try:
                 parts = text_raw.split(maxsplit=2)
                 count = min(int(parts[1]), 150)
@@ -266,7 +250,7 @@ async def business_message_handler(message: Message):
             return
 
         if text.startswith(".ha"):
-            delete_message_fast(cid, message.message_id)
+            delete_fast(cid, message.message_id)
             try:
                 parts = text_raw.split()
                 count = min(int(parts[1]), 150) if len(parts) > 1 else 5
@@ -282,12 +266,12 @@ async def business_message_handler(message: Message):
             return
 
         if text == ".mute":
-            delete_message_fast(cid, message.message_id)
+            delete_fast(cid, message.message_id)
             set_mute(cid, chat_id, True)
             keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[[
                     InlineKeyboardButton(
-                        text="🔓 Размутить",
+                        text="🔓 Снять блок",
                         callback_data=f"unmute:{cid}:{chat_id}"
                     )
                 ]]
@@ -295,7 +279,7 @@ async def business_message_handler(message: Message):
             try:
                 await bot.send_message(
                     chat_id=chat_id,
-                    text="⚡️ <b>Мут активирован. Сообщения удаляются мгновенно.</b>",
+                    text="🤫 <b>Вы больше не сможете здесь говорить.</b> 🛑🤐",
                     parse_mode="HTML",
                     reply_markup=keyboard,
                     business_connection_id=cid
@@ -305,12 +289,12 @@ async def business_message_handler(message: Message):
             return
 
         if text == ".unmute":
-            delete_message_fast(cid, message.message_id)
+            delete_fast(cid, message.message_id)
             set_mute(cid, chat_id, False)
             try:
                 await bot.send_message(
                     chat_id=chat_id,
-                    text="🔊 <b>Мут снят. Сообщения проникают свободно.</b>",
+                    text="🗣 <b>Вам снова разрешено говорить!</b> 🎙✨",
                     parse_mode="HTML",
                     business_connection_id=cid
                 )
@@ -319,10 +303,10 @@ async def business_message_handler(message: Message):
             return
 
         if text == ".antimute":
-            delete_message_fast(cid, message.message_id)
+            delete_fast(cid, message.message_id)
             current = is_antimute(cid, chat_id)
             set_antimute(cid, chat_id, not current)
-            status_text = "🛡 <b>Anti-Mute АКТИВИРОВАН. Сообщения не блокируются.</b>" if not current else "❌ <b>Anti-Mute ВЫКЛЮЧЕН.</b>"
+            status_text = "🛡 <b>Anti-Mute АКТИВИРОВАН. Перехват мута включен!</b> 🔥" if not current else "❌ <b>Anti-Mute ВЫКЛЮЧЕН.</b> ❄️"
             try:
                 await bot.send_message(
                     chat_id=chat_id,
@@ -334,67 +318,14 @@ async def business_message_handler(message: Message):
                 pass
             return
 
-        if text == ".search":
-            delete_message_fast(cid, message.message_id)
-            
-            target_uid = None
-            target_name = "Собеседник"
-
-            old = db.execute("""
-            SELECT user_id, name FROM messages
-            WHERE connection_id=? AND chat_id=? AND user_id!=?
-            ORDER BY rowid DESC LIMIT 1
-            """, (cid, chat_id, owner)).fetchone()
-
-            if old and old[0]:
-                target_uid, target_name = old
-            else:
-                try:
-                    chat_info = await bot.get_chat(chat_id)
-                    target_uid = chat_info.id
-                    target_name = chat_info.full_name or chat_info.title or "Собеседник"
-                except Exception:
-                    target_uid = abs(chat_id)
-                    target_name = "Собеседник"
-
-            records = db.execute("""
-            SELECT name, changed_at FROM name_history
-            WHERE user_id=? ORDER BY id ASC
-            """, (target_uid,)).fetchall()
-
-            name_log = ""
-            if records:
-                for r in records:
-                    name_log += f" ├ <code>{r[1]}</code> ── <b>{r[0]}</b>\n"
-            else:
-                now_str = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-                name_log = f" ├ <code>{now_str}</code> ── <b>{target_name}</b>\n"
-
-            result_card = (
-                f"👤 <b>ПРОФИЛЬ:</b> <b>{target_name}</b>\n\n"
-                f"📜 <b>История изменений имени:</b>\n"
-                f"{name_log}"
-            )
-
-            try:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=result_card,
-                    parse_mode="HTML",
-                    business_connection_id=cid
-                )
-            except TelegramAPIError:
-                pass
-            return
-
         if text == ".clone":
             set_clone(cid, chat_id, True)
-            delete_message_fast(cid, message.message_id)
+            delete_fast(cid, message.message_id)
             return
 
         if text == ".unclone":
             set_clone(cid, chat_id, False)
-            delete_message_fast(cid, message.message_id)
+            delete_fast(cid, message.message_id)
             return
 
 
@@ -441,6 +372,7 @@ async def edited_message_handler(message: Message):
     save_message(message)
 
 
+# ПЕРЕХВАТ И АНТИ-МУТ
 @router.deleted_business_messages()
 async def deleted_messages_handler(update: BusinessMessagesDeleted):
     cid = update.business_connection_id
@@ -464,6 +396,7 @@ async def deleted_messages_handler(update: BusinessMessagesDeleted):
 
         is_owner_msg = (old[0] == owner)
 
+        # Перехват чужого мута: мгновенно переотправляем удаленное сообщение владельца
         if is_owner_msg and antimute_on:
             c_type = old[4] or "text"
             m_text = old[3] or ""
@@ -556,7 +489,7 @@ async def unmute_button(callback: CallbackQuery):
         _, cid, chat_id = callback.data.split(":", 2)
         chat_id = int(chat_id)
     except Exception:
-        await callback.answer("Ошибка кнопки", show_alert=True)
+        await callback.answer("Ошибка", show_alert=True)
         return
 
     owner = get_owner(cid)
@@ -569,7 +502,7 @@ async def unmute_button(callback: CallbackQuery):
     try:
         await bot.send_message(
             chat_id=chat_id,
-            text="🔊 <b>Мут снят. Сообщения проникают свободно.</b>",
+            text="🗣 <b>Вам снова разрешено говорить!</b> 🎙✨",
             parse_mode="HTML",
             business_connection_id=cid
         )
@@ -580,13 +513,12 @@ async def unmute_button(callback: CallbackQuery):
 @router.message(F.text == "/start")
 async def start_handler(message: Message):
     await message.answer(
-        "🤖 <b>Business Bot Online</b>\n\n"
-        "🔇 .mute — включить мут собеседника\n"
-        "🔊 .unmute — выключить мут собеседника\n"
-        "🛡 .antimute — перехват и мгновенное восстановление сообщений при удалении\n"
-        "🔍 .search — точный вывод истории смены имени с временем\n"
-        "📋 .clone — включить клонирование\n"
-        "📋 .unclone — выключить клонирование\n"
+        "🤖 <b>Business Bot Online</b> 🚀\n\n"
+        "🤫 .mute — запретить говорить (мгновенное удаление)\n"
+        "🗣 .unmute — разрешить говорить\n"
+        "🛡 .antimute — включить перехват и мгновенный восстановитель сообщений\n"
+        "📋 .clone — включить автоклонирование\n"
+        "📋 .unclone — выключить автоклонирование\n"
         "🚀 .spam <кол-во 1-150> <текст> — быстрый спам\n"
         "😂 .ha <кол-во 1-150> — спам смехом",
         parse_mode="HTML"
