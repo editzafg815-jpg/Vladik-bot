@@ -1,9 +1,8 @@
 import asyncio
 import logging
 import os
-import random
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime
 from aiohttp import web
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import (
@@ -72,57 +71,16 @@ CREATE TABLE IF NOT EXISTS messages(
 )
 """)
 
+# Таблица истории только для ИМЕНИ и ДАТЫ/ВРЕМЕНИ смены
 db.execute("""
-CREATE TABLE IF NOT EXISTS user_history(
+CREATE TABLE IF NOT EXISTS name_history(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
-    name TEXT,
-    username TEXT,
-    recorded_at TEXT
+    name TEXT NOT NULL,
+    changed_at TEXT NOT NULL
 )
 """)
 db.commit()
-
-
-ID_RANGES = [
-    (10000000, "15.10.2013"),
-    (30000000, "10.02.2014"),
-    (70000000, "20.06.2014"),
-    (110000000, "18.11.2014"),
-    (150000000, "25.03.2015"),
-    (190000000, "14.09.2015"),
-    (250000000, "12.04.2016"),
-    (320000000, "19.10.2016"),
-    (400000000, "08.03.2017"),
-    (500000000, "17.11.2017"),
-    (650000000, "22.04.2018"),
-    (780000000, "15.10.2018"),
-    (900000000, "03.04.2019"),
-    (1050000000, "11.11.2019"),
-    (1250000000, "16.03.2020"),
-    (1500000000, "20.09.2020"),
-    (1800000000, "14.02.2021"),
-    (2140000000, "25.08.2021"),
-    (5200000000, "10.03.2022"),
-    (5600000000, "18.09.2022"),
-    (6200000000, "05.04.2023"),
-    (6700000000, "22.11.2023"),
-    (7200000000, "14.05.2024"),
-    (7800000000, "29.11.2024"),
-    (8300000000, "10.06.2025"),
-    (9000000000, "15.01.2026"),
-]
-
-def calculate_exact_reg_date(uid: int) -> str:
-    if uid < 0:
-        return "Чат / Канал"
-    for max_id, d_str in ID_RANGES:
-        if uid <= max_id:
-            base_date = datetime.strptime(d_str, "%d.%m.%Y")
-            offset_days = (uid % 25) - 12
-            exact_d = base_date + timedelta(days=offset_days)
-            return exact_d.strftime("%d.%m.%Y")
-    return "02.04.2026"
 
 
 def get_owner(cid):
@@ -217,17 +175,17 @@ def save_message(message: Message):
         cid, message.chat.id, message.message_id, user_id, name, username, text, content_type, media_file_id, str(message.date)
     ))
 
+    # Фиксация точной даты, времени и самого имени при смене
     if user_id:
         last_rec = db.execute("""
-        SELECT name, username FROM user_history WHERE user_id=? ORDER BY id DESC LIMIT 1
+        SELECT name FROM name_history WHERE user_id=? ORDER BY id DESC LIMIT 1
         """, (user_id,)).fetchone()
         
-        curr_uname = username or "без username"
-        if not last_rec or last_rec[0] != name or last_rec[1] != curr_uname:
+        if not last_rec or last_rec[0] != name:
             db.execute("""
-            INSERT INTO user_history(user_id, name, username, recorded_at)
-            VALUES (?, ?, ?, ?)
-            """, (user_id, name, curr_uname, datetime.now().strftime("%d.%m.%Y %H:%M")))
+            INSERT INTO name_history(user_id, name, changed_at)
+            VALUES (?, ?, ?)
+            """, (user_id, name, datetime.now().strftime("%d.%m.%Y %H:%M:%S")))
 
     db.commit()
 
@@ -318,15 +276,11 @@ async def business_message_handler(message: Message):
             try:
                 parts = text_raw.split()
                 count = min(int(parts[1]), 150) if len(parts) > 1 else 5
-                ha_variants = [
-                    "ахахах", "АХАХАХА", "ахахахаххах", "хахаха", "АХАХАХАХАХАХ",
-                    "хвхвхв", "пхахаха", "хвхвдплв", "АХХАХАВХВХ", "хыхыхы",
-                    "ахахвхвхв", "вхвхвхвх", "АХАХАХАХАХ", "хвхвхвхвхв", "пхахахвхв"
-                ]
+                ha_variants = ["ахахах", "АХАХАХА", "хахаха", "вхвхвхвх", "пхахахвхв"]
                 for _ in range(count):
                     await bot.send_message(
                         chat_id=chat_id,
-                        text=random.choice(ha_variants),
+                        text=import_random_choice(ha_variants),
                         business_connection_id=cid
                     )
             except Exception:
@@ -374,7 +328,7 @@ async def business_message_handler(message: Message):
             delete_message_now(cid, message.message_id)
             current = is_antimute(cid, chat_id)
             set_antimute(cid, chat_id, not current)
-            status_text = "🛡 <b>Anti-Mute ВКЛЮЧЕН!</b> Если вас замутили, ваши сообщения будут восстанавливаться мгновенно." if not current else "❌ <b>Anti-Mute ВЫКЛЮЧЕН.</b>"
+            status_text = "🛡 <b>Anti-Mute ВКЛЮЧЕН.</b>" if not current else "❌ <b>Anti-Mute ВЫКЛЮЧЕН.</b>"
             try:
                 await bot.send_message(
                     chat_id=chat_id,
@@ -391,116 +345,50 @@ async def business_message_handler(message: Message):
             
             target_uid = None
             target_name = "Собеседник"
-            target_user = None
 
             old = db.execute("""
-            SELECT user_id, name, username FROM messages
+            SELECT user_id, name FROM messages
             WHERE connection_id=? AND chat_id=? AND user_id!=?
             ORDER BY rowid DESC LIMIT 1
             """, (cid, chat_id, owner)).fetchone()
 
             if old and old[0]:
-                target_uid, target_name, target_user = old
+                target_uid, target_name = old
             else:
                 try:
                     chat_info = await bot.get_chat(chat_id)
                     target_uid = chat_info.id
                     target_name = chat_info.full_name or chat_info.title or "Собеседник"
-                    target_user = chat_info.username
                 except Exception:
                     target_uid = abs(chat_id)
                     target_name = "Собеседник"
-                    target_user = None
+
+            records = db.execute("""
+            SELECT name, changed_at FROM name_history
+            WHERE user_id=? ORDER BY id ASC
+            """, (target_uid,)).fetchall()
+
+            if records:
+                name_log = ""
+                for r in records:
+                    name_log += f" ├ <code>{r[1]}</code> — «<b>{r[0]}</b>»\n"
+            else:
+                now_str = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+                name_log = f" ├ <code>{now_str}</code> — «<b>{target_name}</b>»\n"
+
+            result_card = (
+                f"👤 <b>ПРОФИЛЬ: {target_name}</b>\n\n"
+                f"📝 <b>История смены имени (Дата и время):</b>\n"
+                f"{name_log}"
+            )
 
             try:
-                sent = await bot.send_message(
-                    chat_id=chat_id,
-                    text="📡 <b>[ ⚙️ Подключение к базе данных... ] 0%</b> ⏳",
-                    parse_mode="HTML",
-                    business_connection_id=cid
-                )
-
-                anim_stages = [
-                    "🔎 <b>[ 🌐 Сканирование Telegram ID... ] 28%</b> 🔄",
-                    "📊 <b>[ 📂 Анализ смены аватарок и юзернеймов... ] 64%</b> ⏳",
-                    "🔓 <b>[ ⚡ Получение точных дат из реестра... ] 91%</b> ⚡",
-                    "✅ <b>[ 🎯 Досье успешно сформировано! ] 100%</b> ✨"
-                ]
-
-                for stage in anim_stages:
-                    await asyncio.sleep(0.5)
-                    try:
-                        await bot.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=sent.message_id,
-                            text=stage,
-                            parse_mode="HTML",
-                            business_connection_id=cid
-                        )
-                    except TelegramAPIError:
-                        pass
-
-                await asyncio.sleep(0.4)
-                delete_message_now(cid, sent.message_id)
-
-                reg_date_str = calculate_exact_reg_date(target_uid)
-
-                random.seed(target_uid)
-                photo_days = (target_uid % 35) + 3
-                name_days = (target_uid % 70) + 15
-                user_days = (target_uid % 120) + 25
-
-                photo_date = (datetime.now() - timedelta(days=photo_days)).strftime("%d.%m.%Y")
-                name_date = (datetime.now() - timedelta(days=name_days)).strftime("%d.%m.%Y")
-                user_date = (datetime.now() - timedelta(days=user_days)).strftime("%d.%m.%Y")
-
-                prev_name_rand = f"User_{str(target_uid)[:4]}"
-                prev_user_rand = f"old_{str(target_uid)[-4:]}_nick"
-                random.seed()
-
-                history_rows = db.execute("""
-                SELECT name, username, recorded_at FROM user_history
-                WHERE user_id=? ORDER BY id ASC
-                """, (target_uid,)).fetchall()
-
-                if len(history_rows) >= 2:
-                    old_u = history_rows[-2][1]
-                    new_u = history_rows[-1][1]
-                    user_change_str = f"с @{old_u} на @{new_u}"
-                    
-                    old_n = history_rows[-2][0]
-                    new_n = history_rows[-1][0]
-                    name_change_str = f"с «{old_n}» на «{new_n}»"
-                else:
-                    curr_u = target_user if target_user else "без_юзернейма"
-                    user_change_str = f"с @{prev_user_rand} на @{curr_u}"
-                    name_change_str = f"с «{prev_name_rand}» на «{target_name}»"
-
-                result_card = (
-                    "🎯 <b>РЕЗУЛЬТАТ ПОЛНОГО АНАЛИЗА АККАУНТА:</b>\n\n"
-                    f"👤 <b>Имя профиля:</b> {target_name}\n"
-                    f"🆔 <b>Telegram ID:</b> <code>{target_uid}</code>\n"
-                    f"🌐 <b>Текущий @username:</b> @{target_user if target_user else 'Скрыт'}\n\n"
-                    f"📅 <b>Точная дата регистрации аккаунта:</b>\n"
-                    f"└ <code>{reg_date_str}</code>\n\n"
-                    f"🖼 <b>Точная дата смены аватарки (фото профиля):</b>\n"
-                    f"└ <code>{photo_date}</code> <i>({photo_days} дн. назад)</i>\n\n"
-                    f"✏️ <b>Точная дата смены имени/фамилии:</b>\n"
-                    f"└ <code>{name_date}</code> <i>({name_days} дн. назад)</i>\n"
-                    f"└ <i>Изменено: {name_change_str}</i>\n\n"
-                    f"🏷 <b>Точная дата смены юзернейма:</b>\n"
-                    f"└ <code>{user_date}</code> <i>({user_days} дн. назад)</i>\n"
-                    f"└ <i>Изменено: {user_change_str}</i>\n\n"
-                    "🔒 <i>Все данные проверены и верифицированы.</i>"
-                )
-
                 await bot.send_message(
                     chat_id=chat_id,
                     text=result_card,
                     parse_mode="HTML",
                     business_connection_id=cid
                 )
-
             except TelegramAPIError:
                 pass
             return
@@ -514,6 +402,11 @@ async def business_message_handler(message: Message):
             set_clone(cid, chat_id, False)
             delete_message_now(cid, message.message_id)
             return
+
+
+def import_random_choice(seq):
+    import random
+    return random.choice(seq)
 
 
 @router.edited_business_message()
@@ -693,13 +586,13 @@ async def unmute_button(callback: CallbackQuery):
 @router.message(F.text == "/start")
 async def start_handler(message: Message):
     await message.answer(
-        "🤖 <b>Business Bot Turbo Max</b>\n\n"
-        "🔇 .mute — включить mute\n"
-        "🔊 .unmute — выключить mute\n"
-        "🛡 .antimute — защита от удаления ваших сообщений\n"
-        "🔍 .search — пробив аккаунта с историей и датами\n"
-        "📋 .clone — включить clone\n"
-        "📋 .unclone — выключить clone\n"
+        "🤖 <b>Business Bot Online</b>\n\n"
+        "🔇 .mute — включить мут собеседника\n"
+        "🔊 .unmute — выключить мут собеседника\n"
+        "🛡 .antimute — защита от удаления собственных сообщений\n"
+        "🔍 .search — проверка точной истории смены имени\n"
+        "📋 .clone — включить клонирование\n"
+        "📋 .unclone — выключить клонирование\n"
         "🚀 .spam <кол-во 1-150> <текст> — быстрый спам\n"
         "😂 .ha <кол-во 1-150> — спам смехом",
         parse_mode="HTML"
