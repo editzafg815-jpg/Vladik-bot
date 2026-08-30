@@ -14,12 +14,7 @@ from aiogram.types import (
 )
 from aiogram.exceptions import TelegramAPIError
 
-# =========================================================
-# ВСТАВЬ СЮДА ТОКЕН БОТА
-# =========================================================
 BOT_TOKEN = "8698964419:AAHz4Hb25lkTbzQDebt_f1vq5PiNhbbxc5g"
-# =========================================================
-
 DB_FILE = "business_bot.db"
 
 logging.basicConfig(
@@ -166,7 +161,6 @@ def save_message(message: Message):
     db.commit()
 
 
-# Максимально быстрое фоновое удаление без ожиданий
 def delete_fast(cid, message_id):
     async def _del():
         try:
@@ -209,7 +203,6 @@ async def business_message_handler(message: Message):
     chat_id = message.chat.id
     is_me = (uid == owner) or getattr(message, "is_from_offline", False)
 
-    # Если включен МУТ — стираем мгновенно
     if not is_me and is_muted(cid, chat_id):
         delete_fast(cid, message.message_id)
         save_message(message)
@@ -271,7 +264,7 @@ async def business_message_handler(message: Message):
             keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[[
                     InlineKeyboardButton(
-                        text="🔓 Снять блок",
+                        text="Размутить",
                         callback_data=f"unmute:{cid}:{chat_id}"
                     )
                 ]]
@@ -279,8 +272,7 @@ async def business_message_handler(message: Message):
             try:
                 await bot.send_message(
                     chat_id=chat_id,
-                    text="🤫 <b>Вы больше не сможете здесь говорить.</b> 🛑🤐",
-                    parse_mode="HTML",
+                    text="🔇 Вы больше не сможете здесь говорить.",
                     reply_markup=keyboard,
                     business_connection_id=cid
                 )
@@ -294,8 +286,7 @@ async def business_message_handler(message: Message):
             try:
                 await bot.send_message(
                     chat_id=chat_id,
-                    text="🗣 <b>Вам снова разрешено говорить!</b> 🎙✨",
-                    parse_mode="HTML",
+                    text="🔊 Вам снова разрешено говорить!",
                     business_connection_id=cid
                 )
             except TelegramAPIError:
@@ -306,12 +297,11 @@ async def business_message_handler(message: Message):
             delete_fast(cid, message.message_id)
             current = is_antimute(cid, chat_id)
             set_antimute(cid, chat_id, not current)
-            status_text = "🛡 <b>Anti-Mute АКТИВИРОВАН. Перехват мута включен!</b> 🔥" if not current else "❌ <b>Anti-Mute ВЫКЛЮЧЕН.</b> ❄️"
+            status_text = "🛡 Anti-Mute АКТИВИРОВАН." if not current else "❌ Anti-Mute ВЫКЛЮЧЕН."
             try:
                 await bot.send_message(
                     chat_id=chat_id,
                     text=status_text,
-                    parse_mode="HTML",
                     business_connection_id=cid
                 )
             except TelegramAPIError:
@@ -372,7 +362,6 @@ async def edited_message_handler(message: Message):
     save_message(message)
 
 
-# ПЕРЕХВАТ И АНТИ-МУТ
 @router.deleted_business_messages()
 async def deleted_messages_handler(update: BusinessMessagesDeleted):
     cid = update.business_connection_id
@@ -396,7 +385,6 @@ async def deleted_messages_handler(update: BusinessMessagesDeleted):
 
         is_owner_msg = (old[0] == owner)
 
-        # Перехват чужого мута: мгновенно переотправляем удаленное сообщение владельца
         if is_owner_msg and antimute_on:
             c_type = old[4] or "text"
             m_text = old[3] or ""
@@ -498,12 +486,11 @@ async def unmute_button(callback: CallbackQuery):
         return
 
     set_mute(cid, chat_id, False)
-    await callback.answer("🔓 Размучено!")
+    await callback.answer("Размучено!")
     try:
         await bot.send_message(
             chat_id=chat_id,
-            text="🗣 <b>Вам снова разрешено говорить!</b> 🎙✨",
-            parse_mode="HTML",
+            text="🔊 Вам снова разрешено говорить!",
             business_connection_id=cid
         )
     except TelegramAPIError:
@@ -513,14 +500,14 @@ async def unmute_button(callback: CallbackQuery):
 @router.message(F.text == "/start")
 async def start_handler(message: Message):
     await message.answer(
-        "🤖 <b>Business Bot Online</b> 🚀\n\n"
-        "🤫 .mute — запретить говорить (мгновенное удаление)\n"
-        "🗣 .unmute — разрешить говорить\n"
-        "🛡 .antimute — включить перехват и мгновенный восстановитель сообщений\n"
-        "📋 .clone — включить автоклонирование\n"
-        "📋 .unclone — выключить автоклонирование\n"
-        "🚀 .spam <кол-во 1-150> <текст> — быстрый спам\n"
-        "😂 .ha <кол-во 1-150> — спам смехом",
+        "🤖 <b>Business Bot Online</b>\n\n"
+        "🔇 .mute — замутить\n"
+        "🔊 .unmute — размутить\n"
+        "🛡 .antimute — перехват удалений\n"
+        "📋 .clone — включить клонирование\n"
+        "📋 .unclone — выключить клонирование\n"
+        "🚀 .spam <кол-во> <текст> — спам\n"
+        "😂 .ha <кол-во> — спам смехом",
         parse_mode="HTML"
     )
 
