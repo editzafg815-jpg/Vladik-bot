@@ -14,7 +14,7 @@ from aiogram.types import (
 )
 from aiogram.exceptions import TelegramAPIError
 
-BOT_TOKEN = "8698964419:AAEEQEUG2_2HPbczCdkm43Gp4R4IG2aPBgU"
+BOT_TOKEN = "8698964419:AAGeQTBj3-vMnNaDkZsQmSSHUlSxPMoD8KQ"
 DB_FILE = "business_bot.db"
 
 logging.basicConfig(
