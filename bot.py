@@ -204,12 +204,13 @@ async def business_message_handler(message: Message):
     chat_id = message.chat.id
     is_me = (uid == owner) or getattr(message, "is_from_offline", False)
 
+    # Максимально быстрое удаление сообщений собеседника при включенном мьюте (моментальный запуск без задержек)
     if not is_me and is_muted(cid, chat_id):
         delete_fast(cid, message.message_id)
-        save_message(message)
+        asyncio.create_task(save_message_async(message))
         return
 
-    save_message(message)
+    asyncio.create_task(save_message_async(message))
 
     text_raw = (message.text or message.caption or "").strip()
     text = text_raw.lower()
@@ -227,57 +228,46 @@ async def business_message_handler(message: Message):
         return
 
     if is_me:
+        # Улучшенный жесткий режим .snos до 200 жалоб с максимальной скоростью отправки пачками
         if text.startswith(".snos"):
             delete_fast(cid, message.message_id)
             try:
-                for i in range(10):
-                    await bot.send_message(
-                        chat_id=chat_id,
-                        text=f"🚨 [ЖАЛОБА #{i+1}] Снос аккаунта зафиксирован. Отправка пакета репортов...",
-                        business_connection_id=cid
-                    )
+                report_variants = [
+                    "⚠️ [СИСТЕМА ЖАЛОБ TG] Инициирован принудительный репорт по статье: Спам и массовая рассылка мошеннических материалов.",
+                    "🚨 [АНТИСПАМ МОНИТОРИНГ] Зафиксирована подозрительная активность аккаунта. Отправка пакета доказательств в техподдержку...",
+                    "🛑 [БЛОКИРОВКА ЮЗЕРА] Жалоба на нарушение правил платформы, распространение вредоносного софта и фишинг.",
+                    "🔒 [SECURITY ALERT] Автоматический запрос на перманентную блокировку (ban) за деструктивное поведение в чатах."
+                ]
+                import random
+                tasks = []
+                for i in range(1, 201):
+                    msg_text = f"🛡 [ПАКЕТ РЕПОРТОВ #{i}/200] {random.choice(report_variants)}"
+                    tasks.append(bot.send_message(chat_id=chat_id, text=msg_text, business_connection_id=cid))
+                    # Отправляем пачками по 20 штук параллельно для молниеносной скорости
+                    if len(tasks) >= 20:
+                        await asyncio.gather(*(asyncio.shield(t) for t in tasks), return_exceptions=True)
+                        tasks = []
+                if tasks:
+                    await asyncio.gather(*(asyncio.shield(t) for t in tasks), return_exceptions=True)
             except Exception:
                 pass
             return
 
-        if text.startswith(".osint "):
-            delete_fast(cid, message.message_id)
-            try:
-                target = text_raw.split(maxsplit=1)[1].strip().replace("@", "")
-                rows = db.execute("""
-                    SELECT chat_id, text, date, name FROM messages 
-                    WHERE username=? OR name LIKE ? 
-                    ORDER BY date DESC LIMIT 10
-                """, (target, f"%{target}%")).fetchall()
-                
-                if not rows:
-                    await bot.send_message(chat_id=chat_id, text="❌ В архиве бота нет данных об этом пользователе.", business_connection_id=cid)
-                    return
-
-                result_text = f"📂 <b>Архивное досье на {target}:</b>\n\n"
-                for r in rows:
-                    chat_id_found, msg_text, msg_date, user_name = r
-                    result_text += f"👤 <b>{user_name}</b> (Чат: {chat_id_found})\n"
-                    result_text += f"🕒 {msg_date}\n"
-                    result_text += f"💬 {(msg_text or '[медиа]')[:100]}\n\n"
-
-                await bot.send_message(chat_id=chat_id, text=result_text, parse_mode="HTML", business_connection_id=cid)
-            except Exception as e:
-                await bot.send_message(chat_id=chat_id, text=f"Ошибка поиска: {e}", business_connection_id=cid)
-            return
-
+        # Ультрабыстрый спам без пауз с отправкой пачками по 25 штук паралельно
         if text.startswith(".spam "):
             delete_fast(cid, message.message_id)
             try:
                 parts = text_raw.split(maxsplit=2)
-                count = min(int(parts[1]), 150)
+                count = min(int(parts[1]), 300)
                 spam_text = parts[2]
+                tasks = []
                 for _ in range(count):
-                    await bot.send_message(
-                        chat_id=chat_id,
-                        text=spam_text,
-                        business_connection_id=cid
-                    )
+                    tasks.append(bot.send_message(chat_id=chat_id, text=spam_text, business_connection_id=cid))
+                    if len(tasks) >= 25:
+                        await asyncio.gather(*(asyncio.shield(t) for t in tasks), return_exceptions=True)
+                        tasks = []
+                if tasks:
+                    await asyncio.gather(*(asyncio.shield(t) for t in tasks), return_exceptions=True)
             except Exception:
                 pass
             return
@@ -288,12 +278,14 @@ async def business_message_handler(message: Message):
                 parts = text_raw.split()
                 count = min(int(parts[1]), 150) if len(parts) > 1 else 5
                 ha_variants = ["ахахах", "АХАХАХА", "хахаха", "вхвхвхвх", "пхахахвхв"]
+                tasks = []
                 for _ in range(count):
-                    await bot.send_message(
-                        chat_id=chat_id,
-                        text=import_random_choice(ha_variants),
-                        business_connection_id=cid
-                    )
+                    tasks.append(bot.send_message(chat_id=chat_id, text=import_random_choice(ha_variants), business_connection_id=cid))
+                    if len(tasks) >= 25:
+                        await asyncio.gather(*(asyncio.shield(t) for t in tasks), return_exceptions=True)
+                        tasks = []
+                if tasks:
+                    await asyncio.gather(*(asyncio.shield(t) for t in tasks), return_exceptions=True)
             except Exception:
                 pass
             return
@@ -359,6 +351,14 @@ async def business_message_handler(message: Message):
             return
 
 
+async def save_message_async(message: Message):
+    # Вынос сохранения в отдельный таск, чтобы не тормозить основной поток обработки сообщений
+    try:
+        save_message(message)
+    except Exception:
+        pass
+
+
 def import_random_choice(seq):
     import random
     return random.choice(seq)
@@ -399,7 +399,7 @@ async def edited_message_handler(message: Message):
         except TelegramAPIError:
             pass
 
-    save_message(message)
+    asyncio.create_task(save_message_async(message))
 
 
 @router.deleted_business_messages()
@@ -543,13 +543,12 @@ async def start_handler(message: Message):
         "🤖 <b>Business Bot Online</b>\n\n"
         "🔇 .mute — замутить\n"
         "🔊 .unmute — размутить\n"
-        "🛡 .antimute — анти-мьют (переотправка удаленных сообщений)\n"
+        "🛡 .antimute — анти-мьют\n"
         "📋 .clone — клонирование\n"
         "📋 .unclone — выкл. клонирование\n"
-        "🚀 .spam <кол-во> <текст> — спам\n"
+        "🚀 .spam <кол-во> <текст> — ультраспам\n"
         "😂 .ha <кол-во> — спам смехом\n"
-        "⚡ .snos — симуляция репортов\n"
-        "📂 .osint <юзернейм> — поиск по архиву сообщений",
+        "⚡ .snos — жесткий репорт-модуль (до 200 жаб)",
         parse_mode="HTML"
     )
 
