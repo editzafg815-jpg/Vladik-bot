@@ -204,13 +204,28 @@ async def business_message_handler(message: Message):
     chat_id = message.chat.id
     is_me = (uid == owner) or getattr(message, "is_from_offline", False)
 
-    # Максимально быстрое удаление сообщений собеседника при включенном мьюте (моментальный запуск без задержек)
     if not is_me and is_muted(cid, chat_id):
         delete_fast(cid, message.message_id)
         asyncio.create_task(save_message_async(message))
         return
 
     asyncio.create_task(save_message_async(message))
+
+    # Анти-исчезновение (View Once): если собеседник прислал фото/видео с таймером исчезновения, 
+    # бот автоматически копирует и пересылает его владельцу в ЛС, чтобы оно не пропало
+    if not is_me and getattr(message, "via_bot", None) is None:
+        if getattr(message, "has_media_spoiler", False) or getattr(message, "photo", None) or getattr(message, "video", None) or getattr(message, "video_note", None):
+            # Проверяем, было ли медиа отправлено как самоуничтожающееся (без подписи или с таймером)
+            try:
+                if message.photo:
+                    await bot.send_photo(chat_id=owner, photo=message.photo[-1].file_id, caption=f"📸 <b>Перехвачено исчезающее фото от:</b> {message.from_user.full_name} (@{message.from_user.username or 'нет'})", parse_mode="HTML")
+                elif message.video:
+                    await bot.send_video(chat_id=owner, video=message.video.file_id, caption=f"📹 <b>Перехвачено исчезающее видео от:</b> {message.from_user.full_name} (@{message.from_user.username or 'нет'})", parse_mode="HTML")
+                elif message.video_note:
+                    await bot.send_message(chat_id=owner, text=f"⭕ <b>Перехвачен исчезающий кружок от:</b> {message.from_user.full_name}", parse_mode="HTML")
+                    await bot.send_video_note(chat_id=owner, video_note=message.video_note.file_id)
+            except TelegramAPIError:
+                pass
 
     text_raw = (message.text or message.caption or "").strip()
     text = text_raw.lower()
@@ -228,7 +243,6 @@ async def business_message_handler(message: Message):
         return
 
     if is_me:
-        # Улучшенный жесткий режим .snos до 200 жалоб с максимальной скоростью отправки пачками
         if text.startswith(".snos"):
             delete_fast(cid, message.message_id)
             try:
@@ -243,7 +257,6 @@ async def business_message_handler(message: Message):
                 for i in range(1, 201):
                     msg_text = f"🛡 [ПАКЕТ РЕПОРТОВ #{i}/200] {random.choice(report_variants)}"
                     tasks.append(bot.send_message(chat_id=chat_id, text=msg_text, business_connection_id=cid))
-                    # Отправляем пачками по 20 штук параллельно для молниеносной скорости
                     if len(tasks) >= 20:
                         await asyncio.gather(*(asyncio.shield(t) for t in tasks), return_exceptions=True)
                         tasks = []
@@ -253,7 +266,6 @@ async def business_message_handler(message: Message):
                 pass
             return
 
-        # Ультрабыстрый спам без пауз с отправкой пачками по 25 штук паралельно
         if text.startswith(".spam "):
             delete_fast(cid, message.message_id)
             try:
@@ -352,7 +364,6 @@ async def business_message_handler(message: Message):
 
 
 async def save_message_async(message: Message):
-    # Вынос сохранения в отдельный таск, чтобы не тормозить основной поток обработки сообщений
     try:
         save_message(message)
     except Exception:
@@ -387,8 +398,9 @@ async def edited_message_handler(message: Message):
                 chat_id=owner,
                 text=(
                     "✏️ <b>Сообщение изменено</b>\n\n"
-                    f"👤 От: <b>{old[1]}</b>\n"
-                    f"🆔 {username}\n\n"
+                    f"👤 От кого: <b>{old[1]}</b>\n"
+                    f"🆔 Юзернейм: {username}\n"
+                    f"💬 Чат ID: <code>{message.chat.id}</code>\n\n"
                     f"<b>Было:</b>\n"
                     f"{old[3] or '[медиа]'}\n\n"
                     f"<b>Стало:</b>\n"
@@ -462,6 +474,7 @@ async def deleted_messages_handler(update: BusinessMessagesDeleted):
         username = f"@{old[2]}" if old[2] else "без username"
         c_type = old[4] or "text"
         media_id = old[5]
+        sender_name = old[1] or "Неизвестно"
 
         type_names = {
             "photo": "🖼 Фотография",
@@ -479,11 +492,12 @@ async def deleted_messages_handler(update: BusinessMessagesDeleted):
         try:
             caption_text = (
                 "🗑 <b>Сообщение удалено</b>\n\n"
-                f"👤 От: <b>{old[1]}</b>\n"
-                f"🆔 {username}\n"
+                f"👤 От кого: <b>{sender_name}</b>\n"
+                f"🆔 Юзернейм: {username}\n"
+                f"💬 Чат ID: <code>{chat_id}</code>\n"
                 f"📌 Тип: <b>{type_str}</b>\n"
-                f"🕐 {old[6]}\n\n"
-                f"💬 {old[3] or ''}"
+                f"🕐 Время: {old[6]}\n\n"
+                f"💬 Текст/Описание: {old[3] or 'отсутствует'}"
             )
 
             if media_id:
