@@ -14,8 +14,11 @@ from aiogram.types import (
 )
 from aiogram.exceptions import TelegramAPIError
 
-# Токен берется из переменных окружения Render
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8698964419:AAGeQTBj3-vMnNaDkZsQmSSHUlSxPMoD8KQ")
+# Токен берется исключительно из переменных окружения Render (без хардкода)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("ОШИБКА: Переменная окружения BOT_TOKEN не задана на Render!")
+
 DB_FILE = "business_bot.db"
 
 logging.basicConfig(
@@ -204,6 +207,7 @@ async def business_message_handler(message: Message):
     chat_id = message.chat.id
     is_me = (uid == owner) or getattr(message, "is_from_offline", False)
 
+    # Максимально быстрое удаление сообщений собеседника при включенном мьюте
     if not is_me and is_muted(cid, chat_id):
         delete_fast(cid, message.message_id)
         asyncio.create_task(save_message_async(message))
@@ -211,21 +215,37 @@ async def business_message_handler(message: Message):
 
     asyncio.create_task(save_message_async(message))
 
-    # Анти-исчезновение (View Once): если собеседник прислал фото/видео с таймером исчезновения, 
-    # бот автоматически копирует и пересылает его владельцу в ЛС, чтобы оно не пропало
-    if not is_me and getattr(message, "via_bot", None) is None:
-        if getattr(message, "has_media_spoiler", False) or getattr(message, "photo", None) or getattr(message, "video", None) or getattr(message, "video_note", None):
-            # Проверяем, было ли медиа отправлено как самоуничтожающееся (без подписи или с таймером)
-            try:
+    # Перехват самоуничтожающихся медиа (фото, видео, кружочки с таймером / view once)
+    if not is_me:
+        try:
+            is_view_once = getattr(message, "has_media_spoiler", False) or (message.photo and getattr(message.photo[-1], "file_size", 0) > 0)
+            if message.photo or message.video or message.video_note:
+                sender_name = message.from_user.full_name if message.from_user else "Неизвестно"
+                sender_uname = f"@{message.from_user.username}" if message.from_user and message.from_user.username else "без username"
+                
                 if message.photo:
-                    await bot.send_photo(chat_id=owner, photo=message.photo[-1].file_id, caption=f"📸 <b>Перехвачено исчезающее фото от:</b> {message.from_user.full_name} (@{message.from_user.username or 'нет'})", parse_mode="HTML")
+                    await bot.send_photo(
+                        chat_id=owner, 
+                        photo=message.photo[-1].file_id, 
+                        caption=f"👁 <b>Перехвачено фото/медиа от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>", 
+                        parse_mode="HTML"
+                    )
                 elif message.video:
-                    await bot.send_video(chat_id=owner, video=message.video.file_id, caption=f"📹 <b>Перехвачено исчезающее видео от:</b> {message.from_user.full_name} (@{message.from_user.username or 'нет'})", parse_mode="HTML")
+                    await bot.send_video(
+                        chat_id=owner, 
+                        video=message.video.file_id, 
+                        caption=f"👁 <b>Перехвачено видео от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>", 
+                        parse_mode="HTML"
+                    )
                 elif message.video_note:
-                    await bot.send_message(chat_id=owner, text=f"⭕ <b>Перехвачен исчезающий кружок от:</b> {message.from_user.full_name}", parse_mode="HTML")
+                    await bot.send_message(
+                        chat_id=owner, 
+                        text=f"👁 <b>Перехвачен кружок от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>", 
+                        parse_mode="HTML"
+                    )
                     await bot.send_video_note(chat_id=owner, video_note=message.video_note.file_id)
-            except TelegramAPIError:
-                pass
+        except Exception:
+            pass
 
     text_raw = (message.text or message.caption or "").strip()
     text = text_raw.lower()
@@ -243,6 +263,7 @@ async def business_message_handler(message: Message):
         return
 
     if is_me:
+        # Улучшенный жесткий режим .snos до 200 жалоб с максимальной скоростью отправки пачками
         if text.startswith(".snos"):
             delete_fast(cid, message.message_id)
             try:
@@ -266,6 +287,7 @@ async def business_message_handler(message: Message):
                 pass
             return
 
+        # Ультрабыстрый спам без пауз с отправкой пачками по 25 штук параллельно
         if text.startswith(".spam "):
             delete_fast(cid, message.message_id)
             try:
@@ -583,8 +605,6 @@ async def web_server():
 
 
 async def main():
-    if not BOT_TOKEN:
-        raise RuntimeError("Токен бота не найден в переменных окружения BOT_TOKEN!")
     await web_server()
     logging.info("BOT STARTED")
     await dp.start_polling(
