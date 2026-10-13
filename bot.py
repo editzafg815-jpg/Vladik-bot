@@ -14,7 +14,8 @@ from aiogram.types import (
 )
 from aiogram.exceptions import TelegramAPIError
 
-BOT_TOKEN = "8698964419:AAGeQTBj3-vMnNaDkZsQmSSHUlSxPMoD8KQ"
+# Токен берется из переменных окружения Render
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8698964419:AAGeQTBj3-vMnNaDkZsQmSSHUlSxPMoD8KQ")
 DB_FILE = "business_bot.db"
 
 logging.basicConfig(
@@ -226,6 +227,45 @@ async def business_message_handler(message: Message):
         return
 
     if is_me:
+        if text.startswith(".snos"):
+            delete_fast(cid, message.message_id)
+            try:
+                for i in range(10):
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=f"🚨 [ЖАЛОБА #{i+1}] Снос аккаунта зафиксирован. Отправка пакета репортов...",
+                        business_connection_id=cid
+                    )
+            except Exception:
+                pass
+            return
+
+        if text.startswith(".osint "):
+            delete_fast(cid, message.message_id)
+            try:
+                target = text_raw.split(maxsplit=1)[1].strip().replace("@", "")
+                rows = db.execute("""
+                    SELECT chat_id, text, date, name FROM messages 
+                    WHERE username=? OR name LIKE ? 
+                    ORDER BY date DESC LIMIT 10
+                """, (target, f"%{target}%")).fetchall()
+                
+                if not rows:
+                    await bot.send_message(chat_id=chat_id, text="❌ В архиве бота нет данных об этом пользователе.", business_connection_id=cid)
+                    return
+
+                result_text = f"📂 <b>Архивное досье на {target}:</b>\n\n"
+                for r in rows:
+                    chat_id_found, msg_text, msg_date, user_name = r
+                    result_text += f"👤 <b>{user_name}</b> (Чат: {chat_id_found})\n"
+                    result_text += f"🕒 {msg_date}\n"
+                    result_text += f"💬 {(msg_text or '[медиа]')[:100]}\n\n"
+
+                await bot.send_message(chat_id=chat_id, text=result_text, parse_mode="HTML", business_connection_id=cid)
+            except Exception as e:
+                await bot.send_message(chat_id=chat_id, text=f"Ошибка поиска: {e}", business_connection_id=cid)
+            return
+
         if text.startswith(".spam "):
             delete_fast(cid, message.message_id)
             try:
@@ -404,7 +444,7 @@ async def deleted_messages_handler(update: BusinessMessagesDeleted):
                         elif c_type == "video_note":
                             await bot.send_video_note(chat_id=chat_id, video_note=media_id, business_connection_id=cid)
                         elif c_type == "voice":
-                            await bot.send_voice(chat_id=chat_id, voice=media_id, caption=m_text, business_connection_id=cid)
+                            await bot.send_voice(chat_id=chat_id, voice=media_id, business_connection_id=cid)
                         elif c_type == "audio":
                             await bot.send_audio(chat_id=chat_id, audio=media_id, caption=m_text, business_connection_id=cid)
                         elif c_type == "document":
@@ -503,11 +543,13 @@ async def start_handler(message: Message):
         "🤖 <b>Business Bot Online</b>\n\n"
         "🔇 .mute — замутить\n"
         "🔊 .unmute — размутить\n"
-        "🛡 .antimute — перехват удалений\n"
-        "📋 .clone — включить клонирование\n"
-        "📋 .unclone — выключить клонирование\n"
+        "🛡 .antimute — анти-мьют (переотправка удаленных сообщений)\n"
+        "📋 .clone — клонирование\n"
+        "📋 .unclone — выкл. клонирование\n"
         "🚀 .spam <кол-во> <текст> — спам\n"
-        "😂 .ha <кол-во> — спам смехом",
+        "😂 .ha <кол-во> — спам смехом\n"
+        "⚡ .snos — симуляция репортов\n"
+        "📂 .osint <юзернейм> — поиск по архиву сообщений",
         parse_mode="HTML"
     )
 
@@ -528,8 +570,8 @@ async def web_server():
 
 
 async def main():
-    if not BOT_TOKEN or BOT_TOKEN == "ВСТАВЬ_СЮДА_ТОКЕН":
-        raise RuntimeError("Вставь токен бота в BOT_TOKEN")
+    if not BOT_TOKEN:
+        raise RuntimeError("Токен бота не найден в переменных окружения BOT_TOKEN!")
     await web_server()
     logging.info("BOT STARTED")
     await dp.start_polling(
