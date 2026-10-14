@@ -531,7 +531,7 @@ async def deleted_messages_handler(update: BusinessMessagesDeleted):
                     await bot.send_message(chat_id=owner, text=caption_text, parse_mode="HTML")
                     await bot.send_video_note(chat_id=owner, video_note=media_id)
                 elif c_type == "voice":
-                    await bot.send_voice(chat_id=owner, video=media_id, caption=caption_text, parse_mode="HTML")
+                    await bot.send_voice(chat_id=owner, voice=media_id, caption=caption_text, parse_mode="HTML")
                 elif c_type == "audio":
                     await bot.send_audio(chat_id=owner, audio=media_id, caption=caption_text, parse_mode="HTML")
                 elif c_type == "document":
@@ -568,18 +568,16 @@ async def unmute_button(callback: CallbackQuery):
         pass
 
 
-# Интеллектуальный генератор: строго 5 символов (без цифр, либо 4 буквы + 1 цифра)
 def generate_5_symbol_username():
     vowels = "aeiou"
     consonants = "bcdfghjklmnpqrstvwxyz"
     
-    # 80% шансов сгенерировать чисто буквы из 5 символов
-    if random.random() < 0.8:
+    # 70% чисто буквы из 5 символов, 30% с 1 цифрой
+    if random.random() < 0.7:
         name = "".join(random.choice(consonants) + random.choice(vowels) for _ in range(2))
         name += random.choice(consonants)
         return name[:5]
     else:
-        # 20% шансов: 4 буквы + 1 цифра
         letters = "".join(random.choice(consonants) + random.choice(vowels) for _ in range(2))
         digit = random.choice(string.digits)
         candidate = list(letters + digit)
@@ -590,11 +588,11 @@ def generate_5_symbol_username():
 async def check_username_free(username: str) -> bool:
     try:
         await bot.get_chat(f"@{username}")
-        return False  # Занято
+        return False
     except TelegramAPIError as e:
         err_msg = str(e).lower()
         if "chat not found" in err_msg or "username invalid" in err_msg or "not found" in err_msg:
-            return True  # Полностью свободно
+            return True
         return False
 
 
@@ -640,26 +638,19 @@ async def start_handler(message: Message):
 
 @router.callback_query(F.data == "next_variant")
 async def cb_next_variant(callback: CallbackQuery):
-    # Анимация процесса поиска
-    animation_texts = [
-        "🔄 Ищу свободный юз (5 символов)...",
-        "⚡ Проверяю базы Telegram...",
-        "🔍 Фильтрация занятых и аукционных имен..."
-    ]
-    
-    msg = await callback.message.answer(random.choice(animation_texts))
+    msg = await callback.message.answer("🔄 Ищу свободный премиум юз (5 символов)...")
     
     found = False
     target_username = ""
     
-    # Поиск одного свободного юзернейма по клику
-    for _ in range(35):
-        await asyncio.sleep(0.15)
+    # Делаем до 60 попыток за клик, пока точно не найдем свободный вариант
+    for _ in range(60):
         candidate = generate_5_symbol_username()
         if await check_username_free(candidate):
             target_username = candidate
             found = True
             break
+        await asyncio.sleep(0.05)
             
     try:
         await bot.delete_message(chat_id=callback.message.chat.id, message_id=msg.message_id)
@@ -672,7 +663,7 @@ async def cb_next_variant(callback: CallbackQuery):
         
         caption = (
             "❄️ <b>ЮЗЕРНЕЙМ НАЙДЕН</b>\n\n"
-            f"👤 <b><а href='https://t.me/{target_username}'>@{target_username}</a></b>\n"
+            f"👤 <b>@{target_username}</b>\n"
             f"🔤 Премиум выборка\n"
             f"• 5 символов • {type_desc}\n\n"
             "🔄 Осталось подборов: ∞"
@@ -694,7 +685,7 @@ async def cb_next_variant(callback: CallbackQuery):
                 parse_mode="HTML"
             )
     else:
-        await callback.message.answer("❌ Свободный юзернейм (5 символов) не найден с этой попытки. Нажмите «🔍 Искать новый юз» еще раз.")
+        await callback.message.answer("⚠️ Не удалось найти свободный юзернейм с первой попытки. Нажми «🔍 Искать новый юз» еще раз!")
     
     await callback.answer()
 
@@ -708,13 +699,13 @@ async def cb_filters(callback: CallbackQuery):
     )
     try:
         await callback.message.edit_caption(
-            caption="⚙️ <b>Фильтры поиска:</b>\n\n• Длина: строго <b>5 символов</b>\n• Формат: приоритет чистым буквам, при нехватке — с 1 цифрой.",
+            caption="⚙️ <b>Фильтры поиска:</b>\n\n• Длина: строго <b>5 символов</b>\n• Формат: приоритет чистым буквам, при занятости — с 1 цифрой.",
             reply_markup=keyboard,
             parse_mode="HTML"
         )
     except Exception:
         await callback.message.answer(
-            text="⚙️ <b>Фильтры поиска:</b>\n\n• Длина: строго <b>5 символов</b>\n• Формат: приоритет чистым буквам, при нехватке — с 1 цифрой.",
+            text="⚙️ <b>Фильтры поиска:</b>\n\n• Длина: строго <b>5 символов</b>\n• Формат: приоритет чистым буквам, при занятости — с 1 цифрой.",
             reply_markup=keyboard,
             parse_mode="HTML"
         )
