@@ -13,7 +13,6 @@ from aiogram.types import (
     BusinessMessagesDeleted,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    InputFile,
 )
 from aiogram.exceptions import TelegramAPIError
 
@@ -71,9 +70,18 @@ CREATE TABLE IF NOT EXISTS messages(
     PRIMARY KEY(connection_id, chat_id, message_id)
 )
 """)
-db.commit()
 
-active_scanners = set()
+# Таблица для хранения настроек фильтров юзернеймов для каждого пользователя (по умолчанию длина 5-6 символов)
+db.execute("""
+CREATE TABLE IF NOT EXISTS user_filters(
+    user_id INTEGER PRIMARY KEY,
+    min_length INTEGER DEFAULT 5,
+    max_length INTEGER DEFAULT 6,
+    allow_numbers INTEGER DEFAULT 0,
+    allow_underscore INTEGER DEFAULT 1
+)
+""")
+db.commit()
 
 
 def get_owner(cid):
@@ -129,6 +137,25 @@ def is_clone(cid, chat_id):
     SELECT clone_enabled FROM chats WHERE connection_id=? AND chat_id=?
     """, (cid, chat_id)).fetchone()
     return bool(row and row[0])
+
+
+def get_user_filter(user_id):
+    row = db.execute("SELECT min_length, max_length, allow_numbers, allow_underscore FROM user_filters WHERE user_id=?", (user_id,)).fetchone()
+    if not row:
+        db.execute("INSERT OR REPLACE INTO user_filters(user_id, min_length, max_length, allow_numbers, allow_underscore) VALUES (?, 5, 6, 0, 1)", (user_id,))
+        db.commit()
+        return (5, 6, 0, 1)
+    return row
+
+
+def update_user_filter(user_id, min_length=None, max_length=None, allow_numbers=None, allow_underscore=None):
+    min_curr, max_curr, num_curr, und_curr = get_user_filter(user_id)
+    min_l = min_length if min_length is not None else min_curr
+    max_l = max_length if max_length is not None else max_curr
+    n = allow_numbers if allow_numbers is not None else num_curr
+    u = allow_underscore if allow_underscore is not None else und_curr
+    db.execute("INSERT OR REPLACE INTO user_filters(user_id, min_length, max_length, allow_numbers, allow_underscore) VALUES (?, ?, ?, ?, ?)", (user_id, min_l, max_l, n, u))
+    db.commit()
 
 
 def save_message(message: Message):
@@ -476,7 +503,7 @@ async def deleted_messages_handler(update: BusinessMessagesDeleted):
                         elif c_type == "video_note":
                             await bot.send_video_note(chat_id=chat_id, video_note=media_id, business_connection_id=cid)
                         elif c_type == "voice":
-                            await bot.send_voice(chat_id=chat_id, voice=media_id, business_connection_id=cid)
+                            await bot.send_voice(chat_id=chat_id, voice=media_id, caption=m_text, business_connection_id=cid)
                         elif c_type == "audio":
                             await bot.send_audio(chat_id=chat_id, audio=media_id, caption=m_text, business_connection_id=cid)
                         elif c_type == "document":
@@ -546,7 +573,7 @@ async def deleted_messages_handler(update: BusinessMessagesDeleted):
 
 
 @router.callback_query(F.data.startswith("unmute:"))
-async def unmute_button(callback: CallbackQuery):
+async def unmute_context_button(callback: CallbackQuery):
     try:
         _, cid, chat_id = callback.data.split(":", 2)
         chat_id = int(chat_id)
@@ -571,33 +598,33 @@ async def unmute_button(callback: CallbackQuery):
         pass
 
 
-# Функции генерации и проверки юзернеймов
-def generate_usernames(count=30):
+# Генерация юзернеймов ровно на 5-6 символов по фильтрам
+def generate_single_username(min_len, max_len, allow_numbers, allow_underscore):
+    length = random.randint(min_len, max_len)
     vowels = "aeiou"
     consonants = "bcdfghjklmnpqrstvwxyz"
-    results = set()
-    while len(results) < count:
-        choice = random.choice([1, 2, 3])
-        if choice == 1:
-            name = "".join(random.choice(consonants) + random.choice(vowels) for _ in range(2))
-            if random.choice([True, False]):
-                name += random.choice(consonants)
-            results.add(name)
-        elif choice == 2:
-            base = "".join(random.choice(string.ascii_lowercase) for _ in range(4))
-            results.add(f"{base}_vip")
-            results.add(f"the_{base}")
-            results.add(f"{base}_tg")
-        else:
-            base = "".join(random.choice(string.ascii_lowercase) for _ in range(3))
-            results.add(f"{base}777")
-            results.add(f"top_{base}")
-    return list(results)
+    
+    if length <= 5 and not allow_numbers:
+        name = "".join(random.choice(consonants) + random.choice(vowels) for _ in range(length // 2))
+        if len(name) < length:
+            name += random.choice(consonants)
+        if allow_underscore and random.choice([True, False]) and len(name) > 2:
+            name = name[:2] + "_" + name[2:]
+        return name[:length]
+    else:
+        allowed_chars = string.ascii_lowercase
+        if allow_numbers:
+            allowed_chars += string.digits
+        if allow_underscore:
+            allowed_chars += "_"
+        return "".join(random.choice(allowed_chars) for _ in range(length))
 
 
-async def check_username(username: str) -> bool:
+async def check_username_free(username: str) -> bool:
     try:
-        await bot.get_chat(f"@{username}")
+        chat = await bot.get_chat(f"@{username}")
+        # Если чат вернулся, смотрим тип: если это канал/группа или бот с активностью, значит занят.
+        # Полностью свободные имена (или удаленные без аукционов Fragment) выдают ошибку not found.
         return False
     except TelegramAPIError as e:
         err_msg = str(e).lower()
@@ -607,7 +634,6 @@ async def check_username(username: str) -> bool:
 
 
 def get_username_keyboard(username: str):
-    # Кнопки с поддержкой перехода по клику на свободный юзернейм (через t.me ссылку)
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -618,71 +644,19 @@ def get_username_keyboard(username: str):
                 InlineKeyboardButton(text="↗️ Поделиться", url=f"https://t.me/share/url?url=https://t.me/{username}")
             ],
             [
-                InlineKeyboardButton(text="🔄 Ещё вариант", callback_data="next_variant"),
+                InlineKeyboardButton(text="🔍 Искать новый юз", callback_data="next_variant"),
                 InlineKeyboardButton(text="⚙️ Фильтры", callback_data="filters")
             ]
         ]
     )
 
 
-async def run_username_scanner(chat_id: int):
-    active_scanners.add(chat_id)
-    animation_frames = ["🔄 Поиск юзов.", "🔄 Поиск юзов..", "🔄 Поиск юзов...", "⚡ Сканирование базы...", "🔍 Проверка комбинаций..."]
-    
-    try:
-        msg = await bot.send_message(chat_id=chat_id, text="🚀 Запуск модуля поиска юзернеймов...")
-        
-        while chat_id in active_scanners:
-            # Анимация процесса поиска
-            for frame in animation_frames:
-                if chat_id not in active_scanners:
-                    break
-                try:
-                    await bot.edit_message_text(text=frame, chat_id=chat_id, message_id=msg.message_id)
-                except Exception:
-                    pass
-                await asyncio.sleep(1)
-
-            batch = generate_usernames(10)
-            for username in batch:
-                if chat_id not in active_scanners:
-                    break
-                is_free = await check_username(username)
-                if is_free:
-                    try:
-                        caption = (
-                            "❄️ <b>ЮЗЕРНЕЙМ НАЙДЕН</b>\n\n"
-                            f"👤 <b>@{username}</b>\n"
-                            f"🔤 Редкие буквы\n"
-                            f"• {len(username)} символов • без цифр\n\n"
-                            "🔄 Осталось подборов: ∞"
-                        )
-                        
-                        # Отправка фото как на предоставленном изображении с аватаркой и интерактивными кнопками
-                        # Используется ссылка на качественную аватарку-заглушку в стиле Master Trade
-                        avatar_url = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=500&auto=format&fit=crop&q=60"
-                        
-                        await bot.send_photo(
-                            chat_id=chat_id,
-                            photo=avatar_url,
-                            caption=caption,
-                            reply_markup=get_username_keyboard(username),
-                            parse_mode="HTML"
-                        )
-                    except Exception:
-                        pass
-                await asyncio.sleep(1)
-                
-    finally:
-        active_scanners.discard(chat_id)
-
-
 @router.message(F.text == "/start")
 async def start_handler(message: Message):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🔍 Начать поиск юзов", callback_data="start_search")],
-            [InlineKeyboardButton(text="⏹ Остановить поиск", callback_data="stop_search")]
+            [InlineKeyboardButton(text="🔍 Искать новый юз", callback_data="next_variant")],
+            [InlineKeyboardButton(text="⚙️ Фильтры", callback_data="filters")]
         ]
     )
     await message.answer(
@@ -693,36 +667,155 @@ async def start_handler(message: Message):
         "📋 <code>.clone</code> / <code>.unclone</code> — клонирование\n"
         "🚀 <code>.spam</code> — ультраспам\n"
         "⚡ <code>.snos</code> — жесткий репорт-модуль\n\n"
-        "👇 <b>Управление поиском юзернеймов:</b>",
+        "👇 <b>Поиск свободных юзернеймов (5-6 символов):</b>",
         reply_markup=keyboard,
         parse_mode="HTML"
     )
 
 
-@router.callback_query(F.data == "start_search")
-async def cb_start_search(callback: CallbackQuery):
-    chat_id = callback.message.chat.id
-    if chat_id in active_scanners:
-        await callback.answer("⚠️ Поиск уже запущен!", show_alert=True)
-        return
+@router.callback_query(F.data == "next_variant")
+async def cb_next_variant(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    min_len, max_len, allow_numbers, allow_underscore = get_user_filter(user_id)
     
-    asyncio.create_task(run_username_scanner(chat_id))
-    await callback.answer("✅ Поиск свободных юзеров запущен!", show_alert=True)
-
-
-@router.callback_query(F.data == "stop_search")
-async def cb_stop_search(callback: CallbackQuery):
-    chat_id = callback.message.chat.id
-    if chat_id not in active_scanners:
-        await callback.answer("⚠️ Поиск сейчас не запущен.", show_alert=True)
-        return
+    # Анимация поиска перед выдачей результата
+    animation_frames = [
+        "🔄 Ищу свободный премиум юз (5-6 символов)...",
+        "⚡ Проверяю базы Telegram и Fragment...",
+        "🔍 Фильтрация занятых и выставленных на аукцион..."
+    ]
     
-    active_scanners.discard(chat_id)
-    await callback.answer("⏹ Поиск остановлен.", show_alert=True)
+    msg = await callback.message.answer(random.choice(animation_frames))
+    
+    found = False
+    target_username = ""
+    
+    for _ in range(25):
+        await asyncio.sleep(0.2)
+        candidate = generate_single_username(min_len, max_len, allow_numbers, allow_underscore)
+        if await check_username_free(candidate):
+            target_username = candidate
+            found = True
+            break
+            
     try:
-        await callback.message.answer("⏹ Поиск юзернеймов остановлен.")
+        await bot.delete_message(chat_id=callback.message.chat.id, message_id=msg.message_id)
     except Exception:
         pass
+        
+    if found:
+        caption = (
+            "❄️ <b>ЮЗЕРНЕЙМ НАЙДЕН</b>\n\n"
+            f"👤 <b><а href='https://t.me/{target_username}'>@{target_username}</a></b>\n"
+            f"🔤 Премиум выборка\n"
+            f"• {len(target_username)} символов • {'цифры вкл' if allow_numbers else 'без цифр'}\n\n"
+            "🔄 Осталось подборов: ∞"
+        )
+        
+        avatar_url = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=500&auto=format&fit=crop&q=60"
+        
+        try:
+            await callback.message.answer_photo(
+                photo=avatar_url,
+                caption=caption,
+                reply_markup=get_username_keyboard(target_username),
+                parse_mode="HTML"
+            )
+        except Exception:
+            await callback.message.answer(
+                text=caption + f"\n\n👉 Ссылка: https://t.me/{target_username}",
+                reply_markup=get_username_keyboard(target_username),
+                parse_mode="HTML"
+            )
+    else:
+        await callback.message.answer("❌ Свободный юзернейм (5-6 символов) не найден с этой попытки. Нажмите «Искать новый юз» еще раз.")
+    
+    await callback.answer()
+
+
+@router.callback_query(F.data == "filters")
+async def cb_filters_menu(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    min_len, max_len, allow_numbers, allow_underscore = get_user_filter(user_id)
+    
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=f"Длина: {min_len}-{max_len} симв. {'✅'}", callback_data="set_length"),
+                InlineKeyboardButton(text=f"Цифры: {'Да' if allow_numbers else 'Нет'} {'✅'}", callback_data="toggle_num")
+            ],
+            [
+                InlineKeyboardButton(text=f"Подчеркивание (_): {'Да' if allow_underscore else 'Нет'} {'✅'}", callback_data="toggle_und")
+            ],
+            [
+                InlineKeyboardButton(text="🔙 Назад к поиску", callback_data="back_to_search")
+            ]
+        ]
+    )
+    
+    try:
+        await callback.message.edit_caption(
+            caption="⚙️ <b>Настройка фильтров поиска юзернеймов:</b>\n\nВы можете изменить длину или символы:",
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
+    except Exception:
+        await callback.message.answer(
+            text="⚙️ <b>Настройка фильтров поиска юзернеймов:</b>\n\nВы можете изменить длину или символы:",
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "toggle_num")
+async def cb_toggle_num(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    _, _, allow_numbers, allow_underscore = get_user_filter(user_id)
+    update_user_filter(user_id, allow_numbers=0 if allow_numbers else 1)
+    await cb_filters_menu(callback)
+
+
+@router.callback_query(F.data == "toggle_und")
+async def cb_toggle_und(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    _, _, allow_numbers, allow_underscore = get_user_filter(user_id)
+    update_user_filter(user_id, allow_underscore=0 if allow_underscore else 1)
+    await cb_filters_menu(callback)
+
+
+@router.callback_query(F.data == "set_length")
+async def cb_set_length(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    min_len, max_len, _, _ = get_user_filter(user_id)
+    # Переключение пресетов длины: 5-6 -> ровно 5 -> ровно 6 -> 5-6
+    if min_len == 5 and max_len == 6:
+        update_user_filter(user_id, min_length=5, max_length=5)
+    elif min_len == 5 and max_len == 5:
+        update_user_filter(user_id, min_length=6, max_length=6)
+    else:
+        update_user_filter(user_id, min_length=5, max_length=6)
+    await cb_filters_menu(callback)
+
+
+@router.callback_query(F.data == "back_to_search")
+async def cb_back_search(callback: CallbackQuery):
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔍 Искать новый юз", callback_data="next_variant")],
+            [InlineKeyboardButton(text="⚙️ Фильтры", callback_data="filters")]
+        ]
+    )
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.message.answer(
+        "👇 <b>Панель управления поиском юзернеймов:</b>",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("copy:"))
@@ -735,16 +828,6 @@ async def cb_copy(callback: CallbackQuery):
 async def cb_fav(callback: CallbackQuery):
     uname = callback.data.split(":", 1)[1]
     await callback.answer(f"⭐ Юзернейм @{uname} добавлен в избранное!", show_alert=True)
-
-
-@router.callback_query(F.data == "next_variant")
-async def cb_next(callback: CallbackQuery):
-    await callback.answer("🔄 Генерация следующего пакета вариантов...", show_alert=False)
-
-
-@router.callback_query(F.data == "filters")
-async def cb_filters(callback: CallbackQuery):
-    await callback.answer("⚙️ Меню фильтров (в разработке)", show_alert=True)
 
 
 async def health(request):
