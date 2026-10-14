@@ -70,15 +70,6 @@ CREATE TABLE IF NOT EXISTS messages(
     PRIMARY KEY(connection_id, chat_id, message_id)
 )
 """)
-
-# Таблица для хранения точных настроек фильтров (строго 5 символов, режим без цифр или с 1 цифрой)
-db.execute("""
-CREATE TABLE IF NOT EXISTS user_filters(
-    user_id INTEGER PRIMARY KEY,
-    length INTEGER DEFAULT 5,
-    mode TEXT DEFAULT 'letters_only'
-)
-""")
 db.commit()
 
 
@@ -135,23 +126,6 @@ def is_clone(cid, chat_id):
     SELECT clone_enabled FROM chats WHERE connection_id=? AND chat_id=?
     """, (cid, chat_id)).fetchone()
     return bool(row and row[0])
-
-
-def get_user_filter(user_id):
-    row = db.execute("SELECT length, mode FROM user_filters WHERE user_id=?", (user_id,)).fetchone()
-    if not row:
-        db.execute("INSERT OR REPLACE INTO user_filters(user_id, length, mode) VALUES (?, 5, 'letters_only')", (user_id,))
-        db.commit()
-        return (5, 'letters_only')
-    return row
-
-
-def update_user_filter(user_id, length=None, mode=None):
-    l_curr, m_curr = get_user_filter(user_id)
-    l = length if length is not None else l_curr
-    m = mode if mode is not None else m_curr
-    db.execute("INSERT OR REPLACE INTO user_filters(user_id, length, mode) VALUES (?, ?, ?)", (user_id, l, m))
-    db.commit()
 
 
 def save_message(message: Message):
@@ -499,7 +473,7 @@ async def deleted_messages_handler(update: BusinessMessagesDeleted):
                         elif c_type == "video_note":
                             await bot.send_video_note(chat_id=chat_id, video_note=media_id, business_connection_id=cid)
                         elif c_type == "voice":
-                            await bot.send_voice(chat_id=chat_id, voice=media_id, caption=m_text, business_connection_id=cid)
+                            await bot.send_voice(chat_id=chat_id, voice=media_id, business_connection_id=cid)
                         elif c_type == "audio":
                             await bot.send_audio(chat_id=chat_id, audio=media_id, caption=m_text, business_connection_id=cid)
                         elif c_type == "document":
@@ -557,7 +531,7 @@ async def deleted_messages_handler(update: BusinessMessagesDeleted):
                     await bot.send_message(chat_id=owner, text=caption_text, parse_mode="HTML")
                     await bot.send_video_note(chat_id=owner, video_note=media_id)
                 elif c_type == "voice":
-                    await bot.send_voice(chat_id=owner, voice=media_id, caption=caption_text, parse_mode="HTML")
+                    await bot.send_voice(chat_id=owner, video=media_id, caption=caption_text, parse_mode="HTML")
                 elif c_type == "audio":
                     await bot.send_audio(chat_id=owner, audio=media_id, caption=caption_text, parse_mode="HTML")
                 elif c_type == "document":
@@ -569,7 +543,7 @@ async def deleted_messages_handler(update: BusinessMessagesDeleted):
 
 
 @router.callback_query(F.data.startswith("unmute:"))
-async def unmute_context_button(callback: CallbackQuery):
+async def unmute_button(callback: CallbackQuery):
     try:
         _, cid, chat_id = callback.data.split(":", 2)
         chat_id = int(chat_id)
@@ -594,18 +568,18 @@ async def unmute_context_button(callback: CallbackQuery):
         pass
 
 
-# Генерация строго 5-буквенных юзернеймов по выбранному фильтру
-def generate_5_letter_username(mode):
+# Интеллектуальный генератор: строго 5 символов (без цифр, либо 4 буквы + 1 цифра)
+def generate_5_symbol_username():
     vowels = "aeiou"
     consonants = "bcdfghjklmnpqrstvwxyz"
     
-    if mode == 'letters_only':
-        # Генерация красивого слова из 5 букв (чередование согласных и гласных)
+    # 80% шансов сгенерировать чисто буквы из 5 символов
+    if random.random() < 0.8:
         name = "".join(random.choice(consonants) + random.choice(vowels) for _ in range(2))
         name += random.choice(consonants)
         return name[:5]
     else:
-        # Режим с 1 цифрой: 4 буквы + 1 цифра (или вперемешку)
+        # 20% шансов: 4 буквы + 1 цифра
         letters = "".join(random.choice(consonants) + random.choice(vowels) for _ in range(2))
         digit = random.choice(string.digits)
         candidate = list(letters + digit)
@@ -616,11 +590,11 @@ def generate_5_letter_username(mode):
 async def check_username_free(username: str) -> bool:
     try:
         await bot.get_chat(f"@{username}")
-        return False
+        return False  # Занято
     except TelegramAPIError as e:
         err_msg = str(e).lower()
         if "chat not found" in err_msg or "username invalid" in err_msg or "not found" in err_msg:
-            return True
+            return True  # Полностью свободно
         return False
 
 
@@ -658,7 +632,7 @@ async def start_handler(message: Message):
         "📋 <code>.clone</code> / <code>.unclone</code> — клонирование\n"
         "🚀 <code>.spam</code> — ультраспам\n"
         "⚡ <code>.snos</code> — жесткий репорт-модуль\n\n"
-        "👇 <b>Поиск свободных премиальных юзернеймов (5 символов):</b>",
+        "👇 <b>Нажми кнопку ниже для поиска свободного юзернейма (5 символов):</b>",
         reply_markup=keyboard,
         parse_mode="HTML"
     )
@@ -666,24 +640,22 @@ async def start_handler(message: Message):
 
 @router.callback_query(F.data == "next_variant")
 async def cb_next_variant(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    _, mode = get_user_filter(user_id)
-    
-    # Анимация поиска
-    animation_frames = [
+    # Анимация процесса поиска
+    animation_texts = [
         "🔄 Ищу свободный юз (5 символов)...",
-        "⚡ Проверяю базы Telegram и Fragment...",
+        "⚡ Проверяю базы Telegram...",
         "🔍 Фильтрация занятых и аукционных имен..."
     ]
     
-    msg = await callback.message.answer(random.choice(animation_frames))
+    msg = await callback.message.answer(random.choice(animation_texts))
     
     found = False
     target_username = ""
     
-    for _ in range(30):
+    # Поиск одного свободного юзернейма по клику
+    for _ in range(35):
         await asyncio.sleep(0.15)
-        candidate = generate_5_letter_username(mode)
+        candidate = generate_5_symbol_username()
         if await check_username_free(candidate):
             target_username = candidate
             found = True
@@ -695,12 +667,14 @@ async def cb_next_variant(callback: CallbackQuery):
         pass
         
     if found:
-        mode_text = "Чисто 5 букв" if mode == 'letters_only' else "5 символов (с 1 цифрой)"
+        has_digit = any(char.isdigit() for char in target_username)
+        type_desc = "Чисто 5 букв" if not has_digit else "4 буквы + 1 цифра"
+        
         caption = (
             "❄️ <b>ЮЗЕРНЕЙМ НАЙДЕН</b>\n\n"
             f"👤 <b><а href='https://t.me/{target_username}'>@{target_username}</a></b>\n"
             f"🔤 Премиум выборка\n"
-            f"• 5 символов • {mode_text}\n\n"
+            f"• 5 символов • {type_desc}\n\n"
             "🔄 Осталось подборов: ∞"
         )
         
@@ -720,51 +694,31 @@ async def cb_next_variant(callback: CallbackQuery):
                 parse_mode="HTML"
             )
     else:
-        await callback.message.answer("❌ Свободный юзернейм по вашему фильтру не найден с этой попытки. Нажмите «Искать новый юз» еще раз.")
+        await callback.message.answer("❌ Свободный юзернейм (5 символов) не найден с этой попытки. Нажмите «🔍 Искать новый юз» еще раз.")
     
     await callback.answer()
 
 
 @router.callback_query(F.data == "filters")
-async def cb_filters_menu(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    _, mode = get_user_filter(user_id)
-    
-    mode_display = "Чисто 5 букв ✅" if mode == 'letters_only' else "С 1 цифрой ✅"
-    
-    kb = InlineKeyboardMarkup(
+async def cb_filters(callback: CallbackQuery):
+    keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(text=f"Режим: {mode_display}", callback_data="toggle_mode")
-            ],
-            [
-                InlineKeyboardButton(text="🔙 Назад к поиску", callback_data="back_to_search")
-            ]
+            [InlineKeyboardButton(text="🔙 Назад к поиску", callback_data="back_to_search")]
         ]
     )
-    
     try:
         await callback.message.edit_caption(
-            caption="⚙️ <b>Настройка фильтров поиска юзернеймов:</b>\n\nДлина строго фиксирована: <b>5 символов</b>.\nВыберите тип символов:",
-            reply_markup=kb,
+            caption="⚙️ <b>Фильтры поиска:</b>\n\n• Длина: строго <b>5 символов</b>\n• Формат: приоритет чистым буквам, при нехватке — с 1 цифрой.",
+            reply_markup=keyboard,
             parse_mode="HTML"
         )
     except Exception:
         await callback.message.answer(
-            text="⚙️ <b>Настройка фильтров поиска юзернеймов:</b>\n\nДлина строго фиксирована: <b>5 символов</b>.\nВыберите тип символов:",
-            reply_markup=kb,
+            text="⚙️ <b>Фильтры поиска:</b>\n\n• Длина: строго <b>5 символов</b>\n• Формат: приоритет чистым буквам, при нехватке — с 1 цифрой.",
+            reply_markup=keyboard,
             parse_mode="HTML"
         )
     await callback.answer()
-
-
-@router.callback_query(F.data == "toggle_mode")
-async def cb_toggle_mode(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    _, mode = get_user_filter(user_id)
-    new_mode = 'with_digit' if mode == 'letters_only' else 'letters_only'
-    update_user_filter(user_id, mode=new_mode)
-    await cb_filters_menu(callback)
 
 
 @router.callback_query(F.data == "back_to_search")
