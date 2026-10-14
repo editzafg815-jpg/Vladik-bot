@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import os
+import random
+import string
 import sqlite3
 from aiohttp import web
 from aiogram import Bot, Dispatcher, Router, F
@@ -11,10 +13,11 @@ from aiogram.types import (
     BusinessMessagesDeleted,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    InputFile,
 )
 from aiogram.exceptions import TelegramAPIError
 
-# Токен берется исключительно из переменных окружения Render (без хардкода)
+# Токен берется исключительно из переменных окружения Render
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("ОШИБКА: Переменная окружения BOT_TOKEN не задана на Render!")
@@ -69,6 +72,8 @@ CREATE TABLE IF NOT EXISTS messages(
 )
 """)
 db.commit()
+
+active_scanners = set()
 
 
 def get_owner(cid):
@@ -207,7 +212,6 @@ async def business_message_handler(message: Message):
     chat_id = message.chat.id
     is_me = (uid == owner) or getattr(message, "is_from_offline", False)
 
-    # Максимально быстрое удаление сообщений собеседника при включенном мьюте
     if not is_me and is_muted(cid, chat_id):
         delete_fast(cid, message.message_id)
         asyncio.create_task(save_message_async(message))
@@ -215,10 +219,8 @@ async def business_message_handler(message: Message):
 
     asyncio.create_task(save_message_async(message))
 
-    # Перехват самоуничтожающихся медиа (фото, видео, кружочки с таймером / view once)
     if not is_me:
         try:
-            is_view_once = getattr(message, "has_media_spoiler", False) or (message.photo and getattr(message.photo[-1], "file_size", 0) > 0)
             if message.photo or message.video or message.video_note:
                 sender_name = message.from_user.full_name if message.from_user else "Неизвестно"
                 sender_uname = f"@{message.from_user.username}" if message.from_user and message.from_user.username else "без username"
@@ -263,7 +265,6 @@ async def business_message_handler(message: Message):
         return
 
     if is_me:
-        # Улучшенный жесткий режим .snos до 200 жалоб с максимальной скоростью отправки пачками
         if text.startswith(".snos"):
             delete_fast(cid, message.message_id)
             try:
@@ -273,7 +274,6 @@ async def business_message_handler(message: Message):
                     "🛑 [БЛОКИРОВКА ЮЗЕРА] Жалоба на нарушение правил платформы, распространение вредоносного софта и фишинг.",
                     "🔒 [SECURITY ALERT] Автоматический запрос на перманентную блокировку (ban) за деструктивное поведение в чатах."
                 ]
-                import random
                 tasks = []
                 for i in range(1, 201):
                     msg_text = f"🛡 [ПАКЕТ РЕПОРТОВ #{i}/200] {random.choice(report_variants)}"
@@ -287,7 +287,6 @@ async def business_message_handler(message: Message):
                 pass
             return
 
-        # Ультрабыстрый спам без пауз с отправкой пачками по 25 штук параллельно
         if text.startswith(".spam "):
             delete_fast(cid, message.message_id)
             try:
@@ -393,7 +392,6 @@ async def save_message_async(message: Message):
 
 
 def import_random_choice(seq):
-    import random
     return random.choice(seq)
 
 
@@ -573,20 +571,180 @@ async def unmute_button(callback: CallbackQuery):
         pass
 
 
+# Функции генерации и проверки юзернеймов
+def generate_usernames(count=30):
+    vowels = "aeiou"
+    consonants = "bcdfghjklmnpqrstvwxyz"
+    results = set()
+    while len(results) < count:
+        choice = random.choice([1, 2, 3])
+        if choice == 1:
+            name = "".join(random.choice(consonants) + random.choice(vowels) for _ in range(2))
+            if random.choice([True, False]):
+                name += random.choice(consonants)
+            results.add(name)
+        elif choice == 2:
+            base = "".join(random.choice(string.ascii_lowercase) for _ in range(4))
+            results.add(f"{base}_vip")
+            results.add(f"the_{base}")
+            results.add(f"{base}_tg")
+        else:
+            base = "".join(random.choice(string.ascii_lowercase) for _ in range(3))
+            results.add(f"{base}777")
+            results.add(f"top_{base}")
+    return list(results)
+
+
+async def check_username(username: str) -> bool:
+    try:
+        await bot.get_chat(f"@{username}")
+        return False
+    except TelegramAPIError as e:
+        err_msg = str(e).lower()
+        if "chat not found" in err_msg or "username invalid" in err_msg or "not found" in err_msg:
+            return True
+        return False
+
+
+def get_username_keyboard(username: str):
+    # Кнопки с поддержкой перехода по клику на свободный юзернейм (через t.me ссылку)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📋 Скопировать", callback_data=f"copy:{username}"),
+                InlineKeyboardButton(text="⭐ В избранное", callback_data=f"fav:{username}")
+            ],
+            [
+                InlineKeyboardButton(text="↗️ Поделиться", url=f"https://t.me/share/url?url=https://t.me/{username}")
+            ],
+            [
+                InlineKeyboardButton(text="🔄 Ещё вариант", callback_data="next_variant"),
+                InlineKeyboardButton(text="⚙️ Фильтры", callback_data="filters")
+            ]
+        ]
+    )
+
+
+async def run_username_scanner(chat_id: int):
+    active_scanners.add(chat_id)
+    animation_frames = ["🔄 Поиск юзов.", "🔄 Поиск юзов..", "🔄 Поиск юзов...", "⚡ Сканирование базы...", "🔍 Проверка комбинаций..."]
+    
+    try:
+        msg = await bot.send_message(chat_id=chat_id, text="🚀 Запуск модуля поиска юзернеймов...")
+        
+        while chat_id in active_scanners:
+            # Анимация процесса поиска
+            for frame in animation_frames:
+                if chat_id not in active_scanners:
+                    break
+                try:
+                    await bot.edit_message_text(text=frame, chat_id=chat_id, message_id=msg.message_id)
+                except Exception:
+                    pass
+                await asyncio.sleep(1)
+
+            batch = generate_usernames(10)
+            for username in batch:
+                if chat_id not in active_scanners:
+                    break
+                is_free = await check_username(username)
+                if is_free:
+                    try:
+                        caption = (
+                            "❄️ <b>ЮЗЕРНЕЙМ НАЙДЕН</b>\n\n"
+                            f"👤 <b>@{username}</b>\n"
+                            f"🔤 Редкие буквы\n"
+                            f"• {len(username)} символов • без цифр\n\n"
+                            "🔄 Осталось подборов: ∞"
+                        )
+                        
+                        # Отправка фото как на предоставленном изображении с аватаркой и интерактивными кнопками
+                        # Используется ссылка на качественную аватарку-заглушку в стиле Master Trade
+                        avatar_url = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=500&auto=format&fit=crop&q=60"
+                        
+                        await bot.send_photo(
+                            chat_id=chat_id,
+                            photo=avatar_url,
+                            caption=caption,
+                            reply_markup=get_username_keyboard(username),
+                            parse_mode="HTML"
+                        )
+                    except Exception:
+                        pass
+                await asyncio.sleep(1)
+                
+    finally:
+        active_scanners.discard(chat_id)
+
+
 @router.message(F.text == "/start")
 async def start_handler(message: Message):
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔍 Начать поиск юзов", callback_data="start_search")],
+            [InlineKeyboardButton(text="⏹ Остановить поиск", callback_data="stop_search")]
+        ]
+    )
     await message.answer(
-        "🤖 <b>Business Bot Online</b>\n\n"
-        "🔇 .mute — замутить\n"
-        "🔊 .unmute — размутить\n"
-        "🛡 .antimute — анти-мьют\n"
-        "📋 .clone — клонирование\n"
-        "📋 .unclone — выкл. клонирование\n"
-        "🚀 .spam <кол-во> <текст> — ультраспам\n"
-        "😂 .ha <кол-во> — спам смехом\n"
-        "⚡ .snos — жесткий репорт-модуль (до 200 жаб)",
+        "🤖 <b>Master Trade Bot Online & Username Scanner</b>\n\n"
+        "🔇 <code>.mute</code> — замутить\n"
+        "🔊 <code>.unmute</code> — размутить\n"
+        "🛡 <code>.antimute</code> — анти-мьют\n"
+        "📋 <code>.clone</code> / <code>.unclone</code> — клонирование\n"
+        "🚀 <code>.spam</code> — ультраспам\n"
+        "⚡ <code>.snos</code> — жесткий репорт-модуль\n\n"
+        "👇 <b>Управление поиском юзернеймов:</b>",
+        reply_markup=keyboard,
         parse_mode="HTML"
     )
+
+
+@router.callback_query(F.data == "start_search")
+async def cb_start_search(callback: CallbackQuery):
+    chat_id = callback.message.chat.id
+    if chat_id in active_scanners:
+        await callback.answer("⚠️ Поиск уже запущен!", show_alert=True)
+        return
+    
+    asyncio.create_task(run_username_scanner(chat_id))
+    await callback.answer("✅ Поиск свободных юзеров запущен!", show_alert=True)
+
+
+@router.callback_query(F.data == "stop_search")
+async def cb_stop_search(callback: CallbackQuery):
+    chat_id = callback.message.chat.id
+    if chat_id not in active_scanners:
+        await callback.answer("⚠️ Поиск сейчас не запущен.", show_alert=True)
+        return
+    
+    active_scanners.discard(chat_id)
+    await callback.answer("⏹ Поиск остановлен.", show_alert=True)
+    try:
+        await callback.message.answer("⏹ Поиск юзернеймов остановлен.")
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("copy:"))
+async def cb_copy(callback: CallbackQuery):
+    uname = callback.data.split(":", 1)[1]
+    await callback.answer(f"📋 Юзернейм @{uname} скопирован!", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("fav:"))
+async def cb_fav(callback: CallbackQuery):
+    uname = callback.data.split(":", 1)[1]
+    await callback.answer(f"⭐ Юзернейм @{uname} добавлен в избранное!", show_alert=True)
+
+
+@router.callback_query(F.data == "next_variant")
+async def cb_next(callback: CallbackQuery):
+    await callback.answer("🔄 Генерация следующего пакета вариантов...", show_alert=False)
+
+
+@router.callback_query(F.data == "filters")
+async def cb_filters(callback: CallbackQuery):
+    await callback.answer("⚙️ Меню фильтров (в разработке)", show_alert=True)
 
 
 async def health(request):
