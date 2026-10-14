@@ -71,14 +71,12 @@ CREATE TABLE IF NOT EXISTS messages(
 )
 """)
 
-# Таблица для хранения настроек фильтров юзернеймов для каждого пользователя (по умолчанию длина 5-6 символов)
+# Таблица для хранения точных настроек фильтров (строго 5 символов, режим без цифр или с 1 цифрой)
 db.execute("""
 CREATE TABLE IF NOT EXISTS user_filters(
     user_id INTEGER PRIMARY KEY,
-    min_length INTEGER DEFAULT 5,
-    max_length INTEGER DEFAULT 6,
-    allow_numbers INTEGER DEFAULT 0,
-    allow_underscore INTEGER DEFAULT 1
+    length INTEGER DEFAULT 5,
+    mode TEXT DEFAULT 'letters_only'
 )
 """)
 db.commit()
@@ -140,21 +138,19 @@ def is_clone(cid, chat_id):
 
 
 def get_user_filter(user_id):
-    row = db.execute("SELECT min_length, max_length, allow_numbers, allow_underscore FROM user_filters WHERE user_id=?", (user_id,)).fetchone()
+    row = db.execute("SELECT length, mode FROM user_filters WHERE user_id=?", (user_id,)).fetchone()
     if not row:
-        db.execute("INSERT OR REPLACE INTO user_filters(user_id, min_length, max_length, allow_numbers, allow_underscore) VALUES (?, 5, 6, 0, 1)", (user_id,))
+        db.execute("INSERT OR REPLACE INTO user_filters(user_id, length, mode) VALUES (?, 5, 'letters_only')", (user_id,))
         db.commit()
-        return (5, 6, 0, 1)
+        return (5, 'letters_only')
     return row
 
 
-def update_user_filter(user_id, min_length=None, max_length=None, allow_numbers=None, allow_underscore=None):
-    min_curr, max_curr, num_curr, und_curr = get_user_filter(user_id)
-    min_l = min_length if min_length is not None else min_curr
-    max_l = max_length if max_length is not None else max_curr
-    n = allow_numbers if allow_numbers is not None else num_curr
-    u = allow_underscore if allow_underscore is not None else und_curr
-    db.execute("INSERT OR REPLACE INTO user_filters(user_id, min_length, max_length, allow_numbers, allow_underscore) VALUES (?, ?, ?, ?, ?)", (user_id, min_l, max_l, n, u))
+def update_user_filter(user_id, length=None, mode=None):
+    l_curr, m_curr = get_user_filter(user_id)
+    l = length if length is not None else l_curr
+    m = mode if mode is not None else m_curr
+    db.execute("INSERT OR REPLACE INTO user_filters(user_id, length, mode) VALUES (?, ?, ?)", (user_id, l, m))
     db.commit()
 
 
@@ -598,33 +594,28 @@ async def unmute_context_button(callback: CallbackQuery):
         pass
 
 
-# Генерация юзернеймов ровно на 5-6 символов по фильтрам
-def generate_single_username(min_len, max_len, allow_numbers, allow_underscore):
-    length = random.randint(min_len, max_len)
+# Генерация строго 5-буквенных юзернеймов по выбранному фильтру
+def generate_5_letter_username(mode):
     vowels = "aeiou"
     consonants = "bcdfghjklmnpqrstvwxyz"
     
-    if length <= 5 and not allow_numbers:
-        name = "".join(random.choice(consonants) + random.choice(vowels) for _ in range(length // 2))
-        if len(name) < length:
-            name += random.choice(consonants)
-        if allow_underscore and random.choice([True, False]) and len(name) > 2:
-            name = name[:2] + "_" + name[2:]
-        return name[:length]
+    if mode == 'letters_only':
+        # Генерация красивого слова из 5 букв (чередование согласных и гласных)
+        name = "".join(random.choice(consonants) + random.choice(vowels) for _ in range(2))
+        name += random.choice(consonants)
+        return name[:5]
     else:
-        allowed_chars = string.ascii_lowercase
-        if allow_numbers:
-            allowed_chars += string.digits
-        if allow_underscore:
-            allowed_chars += "_"
-        return "".join(random.choice(allowed_chars) for _ in range(length))
+        # Режим с 1 цифрой: 4 буквы + 1 цифра (или вперемешку)
+        letters = "".join(random.choice(consonants) + random.choice(vowels) for _ in range(2))
+        digit = random.choice(string.digits)
+        candidate = list(letters + digit)
+        random.shuffle(candidate)
+        return "".join(candidate)[:5]
 
 
 async def check_username_free(username: str) -> bool:
     try:
-        chat = await bot.get_chat(f"@{username}")
-        # Если чат вернулся, смотрим тип: если это канал/группа или бот с активностью, значит занят.
-        # Полностью свободные имена (или удаленные без аукционов Fragment) выдают ошибку not found.
+        await bot.get_chat(f"@{username}")
         return False
     except TelegramAPIError as e:
         err_msg = str(e).lower()
@@ -667,7 +658,7 @@ async def start_handler(message: Message):
         "📋 <code>.clone</code> / <code>.unclone</code> — клонирование\n"
         "🚀 <code>.spam</code> — ультраспам\n"
         "⚡ <code>.snos</code> — жесткий репорт-модуль\n\n"
-        "👇 <b>Поиск свободных юзернеймов (5-6 символов):</b>",
+        "👇 <b>Поиск свободных премиальных юзернеймов (5 символов):</b>",
         reply_markup=keyboard,
         parse_mode="HTML"
     )
@@ -676,13 +667,13 @@ async def start_handler(message: Message):
 @router.callback_query(F.data == "next_variant")
 async def cb_next_variant(callback: CallbackQuery):
     user_id = callback.from_user.id
-    min_len, max_len, allow_numbers, allow_underscore = get_user_filter(user_id)
+    _, mode = get_user_filter(user_id)
     
-    # Анимация поиска перед выдачей результата
+    # Анимация поиска
     animation_frames = [
-        "🔄 Ищу свободный премиум юз (5-6 символов)...",
+        "🔄 Ищу свободный юз (5 символов)...",
         "⚡ Проверяю базы Telegram и Fragment...",
-        "🔍 Фильтрация занятых и выставленных на аукцион..."
+        "🔍 Фильтрация занятых и аукционных имен..."
     ]
     
     msg = await callback.message.answer(random.choice(animation_frames))
@@ -690,9 +681,9 @@ async def cb_next_variant(callback: CallbackQuery):
     found = False
     target_username = ""
     
-    for _ in range(25):
-        await asyncio.sleep(0.2)
-        candidate = generate_single_username(min_len, max_len, allow_numbers, allow_underscore)
+    for _ in range(30):
+        await asyncio.sleep(0.15)
+        candidate = generate_5_letter_username(mode)
         if await check_username_free(candidate):
             target_username = candidate
             found = True
@@ -704,11 +695,12 @@ async def cb_next_variant(callback: CallbackQuery):
         pass
         
     if found:
+        mode_text = "Чисто 5 букв" if mode == 'letters_only' else "5 символов (с 1 цифрой)"
         caption = (
             "❄️ <b>ЮЗЕРНЕЙМ НАЙДЕН</b>\n\n"
             f"👤 <b><а href='https://t.me/{target_username}'>@{target_username}</a></b>\n"
             f"🔤 Премиум выборка\n"
-            f"• {len(target_username)} символов • {'цифры вкл' if allow_numbers else 'без цифр'}\n\n"
+            f"• 5 символов • {mode_text}\n\n"
             "🔄 Осталось подборов: ∞"
         )
         
@@ -728,7 +720,7 @@ async def cb_next_variant(callback: CallbackQuery):
                 parse_mode="HTML"
             )
     else:
-        await callback.message.answer("❌ Свободный юзернейм (5-6 символов) не найден с этой попытки. Нажмите «Искать новый юз» еще раз.")
+        await callback.message.answer("❌ Свободный юзернейм по вашему фильтру не найден с этой попытки. Нажмите «Искать новый юз» еще раз.")
     
     await callback.answer()
 
@@ -736,16 +728,14 @@ async def cb_next_variant(callback: CallbackQuery):
 @router.callback_query(F.data == "filters")
 async def cb_filters_menu(callback: CallbackQuery):
     user_id = callback.from_user.id
-    min_len, max_len, allow_numbers, allow_underscore = get_user_filter(user_id)
+    _, mode = get_user_filter(user_id)
+    
+    mode_display = "Чисто 5 букв ✅" if mode == 'letters_only' else "С 1 цифрой ✅"
     
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text=f"Длина: {min_len}-{max_len} симв. {'✅'}", callback_data="set_length"),
-                InlineKeyboardButton(text=f"Цифры: {'Да' if allow_numbers else 'Нет'} {'✅'}", callback_data="toggle_num")
-            ],
-            [
-                InlineKeyboardButton(text=f"Подчеркивание (_): {'Да' if allow_underscore else 'Нет'} {'✅'}", callback_data="toggle_und")
+                InlineKeyboardButton(text=f"Режим: {mode_display}", callback_data="toggle_mode")
             ],
             [
                 InlineKeyboardButton(text="🔙 Назад к поиску", callback_data="back_to_search")
@@ -755,46 +745,25 @@ async def cb_filters_menu(callback: CallbackQuery):
     
     try:
         await callback.message.edit_caption(
-            caption="⚙️ <b>Настройка фильтров поиска юзернеймов:</b>\n\nВы можете изменить длину или символы:",
+            caption="⚙️ <b>Настройка фильтров поиска юзернеймов:</b>\n\nДлина строго фиксирована: <b>5 символов</b>.\nВыберите тип символов:",
             reply_markup=kb,
             parse_mode="HTML"
         )
     except Exception:
         await callback.message.answer(
-            text="⚙️ <b>Настройка фильтров поиска юзернеймов:</b>\n\nВы можете изменить длину или символы:",
+            text="⚙️ <b>Настройка фильтров поиска юзернеймов:</b>\n\nДлина строго фиксирована: <b>5 символов</b>.\nВыберите тип символов:",
             reply_markup=kb,
             parse_mode="HTML"
         )
     await callback.answer()
 
 
-@router.callback_query(F.data == "toggle_num")
-async def cb_toggle_num(callback: CallbackQuery):
+@router.callback_query(F.data == "toggle_mode")
+async def cb_toggle_mode(callback: CallbackQuery):
     user_id = callback.from_user.id
-    _, _, allow_numbers, allow_underscore = get_user_filter(user_id)
-    update_user_filter(user_id, allow_numbers=0 if allow_numbers else 1)
-    await cb_filters_menu(callback)
-
-
-@router.callback_query(F.data == "toggle_und")
-async def cb_toggle_und(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    _, _, allow_numbers, allow_underscore = get_user_filter(user_id)
-    update_user_filter(user_id, allow_underscore=0 if allow_underscore else 1)
-    await cb_filters_menu(callback)
-
-
-@router.callback_query(F.data == "set_length")
-async def cb_set_length(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    min_len, max_len, _, _ = get_user_filter(user_id)
-    # Переключение пресетов длины: 5-6 -> ровно 5 -> ровно 6 -> 5-6
-    if min_len == 5 and max_len == 6:
-        update_user_filter(user_id, min_length=5, max_length=5)
-    elif min_len == 5 and max_len == 5:
-        update_user_filter(user_id, min_length=6, max_length=6)
-    else:
-        update_user_filter(user_id, min_length=5, max_length=6)
+    _, mode = get_user_filter(user_id)
+    new_mode = 'with_digit' if mode == 'letters_only' else 'letters_only'
+    update_user_filter(user_id, mode=new_mode)
     await cb_filters_menu(callback)
 
 
