@@ -82,7 +82,6 @@ CREATE TABLE IF NOT EXISTS user_filters(
 )
 """)
 
-# Таблица для защиты от повторной выдачи одинаковых ников
 db.execute("""
 CREATE TABLE IF NOT EXISTS used_usernames(
     username TEXT PRIMARY KEY
@@ -418,13 +417,11 @@ async def deleted_messages_handler(update: BusinessMessagesDeleted):
     pass
 
 
-# Ультра-рандомизатор крутых ников (разнообразные премиум слоговые комбинации)
 def generate_username(mode="letters_only", custom_chars=""):
     vowels = "aeiouy"
     consonants = "bcdfghjklmnpqrstvwxz"
     
     if mode == "letters_only":
-        # Динамические вариации длины (от 4 до 6 символов) для полного разнообразия
         length = random.choice([4, 5, 5, 6])
         if length == 4:
             return "".join(random.choices(consonants, k=1) + random.choices(vowels, k=1) + random.choices(consonants, k=2))
@@ -459,22 +456,18 @@ def generate_username(mode="letters_only", custom_chars=""):
         return generate_username("letters_only", custom_chars)
 
 
-# Проверка на 100% свободу через Telegram и Fragment
 async def check_username_free(username: str) -> bool:
-    # Проверка на то, выдавали ли мы его уже ранее
     if is_username_used(username):
         return False
 
-    # 1. Проверка через официальный Telegram API
     try:
         await bot.get_chat(f"@{username}")
-        return False  # Занято
+        return False
     except TelegramAPIError as e:
         err_msg = str(e).lower()
         if not ("chat not found" in err_msg or "username invalid" in err_msg or "not found" in err_msg):
             return False
 
-    # 2. Проверка через Fragment
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(f"https://fragment.com/username/{username}", timeout=1.2) as resp:
@@ -556,10 +549,9 @@ async def cb_next_variant(callback: CallbackQuery):
     ]
     
     anim_idx = 0
-    # Жесткий лимит 3 секунды для молниеносного результата
     while (asyncio.get_event_loop().time() - start_time) < 3.0:
         candidate = generate_username(mode, custom_chars)
-        if await check_username_free(candidate):
+        if not is_username_used(candidate) and await check_username_free(candidate):
             target_username = candidate
             break
         
@@ -575,9 +567,8 @@ async def cb_next_variant(callback: CallbackQuery):
             
         await asyncio.sleep(0.001)
             
-    # Если за 3 сек рандом не подобрал, берем гарантированный свежий префикс
     if not target_username:
-        prefixes = ["zesty", "vortex", "nexus", "lumen", "astral", "zenith", "vertex", "vector"]
+        prefixes = ["zesty", "vortex", "nexus", "lumen", "astral", "zenith", "vertex", "vector", "prime", "apex", "nova", "pulse"]
         random.shuffle(prefixes)
         for p in prefixes:
             cand = f"{p}{random.choice('aeiouy')}"
@@ -585,9 +576,8 @@ async def cb_next_variant(callback: CallbackQuery):
                 target_username = cand
                 break
         if not target_username:
-            target_username = f"lux{random.randint(10,99)}"
+            target_username = f"lux{random.randint(100,999)}"
 
-    # Помечаем ник как использованный, чтобы бот его больше никогда не повторил
     mark_username_used(target_username)
 
     try:
