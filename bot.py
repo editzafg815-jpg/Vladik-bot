@@ -448,7 +448,7 @@ def generate_username(mode="mixed", custom_chars=""):
 async def check_username_free(username: str) -> bool:
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"https://fragment.com/username/{username}", timeout=2) as resp:
+            async with session.get(f"https://fragment.com/username/{username}", timeout=1.5) as resp:
                 html = await resp.text()
                 if "is taken" in html or "Auction" in html or "bidding" in html or "Unavailable" in html:
                     return False
@@ -520,18 +520,28 @@ async def cb_next_variant(callback: CallbackQuery):
     user_id = callback.from_user.id
     mode, custom_chars = get_user_filter_settings(user_id)
     
-    msg = await callback.message.answer("🔄 Ищу 100% свободный премиум юзернейм...")
+    # Анимация поиска с меняющимися точками
+    anim_steps = [
+        "🔄 Подбираем премиум комбинацию.",
+        "🔄 Подбираем премиум комбинацию..",
+        "🔄 Подбираем премиум комбинацию...",
+        "⚡ Проверяем базы Telegram и Fragment.",
+        "⚡ Проверяем базы Telegram и Fragment.."
+    ]
+    
+    msg = await callback.message.answer(random.choice(anim_steps))
     
     found = False
     target_username = ""
     
-    for _ in range(60):
+    # Молниеносный итеративный перебор
+    for _ in range(40):
         candidate = generate_username(mode, custom_chars)
         if await check_username_free(candidate):
             target_username = candidate
             found = True
             break
-        await asyncio.sleep(0.005)
+        await asyncio.sleep(0.001)
             
     try:
         await bot.delete_message(chat_id=callback.message.chat.id, message_id=msg.message_id)
@@ -540,9 +550,9 @@ async def cb_next_variant(callback: CallbackQuery):
         
     if found:
         caption = (
-            "❄️ <b>ЮЗЕРНЕЙМ НАЙДЕН (100% СВОБОДЕН)</b>\n\n"
+            "❄️ <b>ТОПОВЫЙ ЮЗЕРНЕЙМ НАЙДЕН</b>\n\n"
             f"👤 <b>@{target_username}</b>\n"
-            f"🚫 Чистый (не занят, нет на Fragment)\n\n"
+            f"🚫 100% свободен (не занят, нет на Fragment)\n\n"
             "📋 Нажми «Скопировать», чтобы сохранить в буфер."
         )
         
@@ -562,6 +572,7 @@ async def cb_next_variant(callback: CallbackQuery):
                 parse_mode="HTML"
             )
     else:
+        # Авто-перезапуск, если в этой микро-партии все оказались заняты
         await cb_next_variant(callback)
         return
     
