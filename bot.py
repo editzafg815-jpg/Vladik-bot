@@ -98,18 +98,20 @@ def get_user_filter_settings(user_id):
 
 
 def set_user_mode(user_id, mode):
-    db.execute("""
-    INSERT INTO user_filters(user_id, mode, custom_chars) VALUES (?, ?, COALESCE((SELECT custom_chars FROM user_filters WHERE user_id=?), ''))
-    ON CONFLICT(user_id) DO UPDATE SET mode=excluded.mode
-    """, (user_id, mode, user_id))
+    db.execute(
+        "INSERT INTO user_filters(user_id, mode, custom_chars) VALUES (?, ?, COALESCE((SELECT custom_chars FROM user_filters WHERE user_id=?), '')) "
+        "ON CONFLICT(user_id) DO UPDATE SET mode=excluded.mode",
+        (user_id, mode, user_id)
+    )
     db.commit()
 
 
 def set_user_custom_chars(user_id, custom_chars):
-    db.execute("""
-    INSERT INTO user_filters(user_id, mode, custom_chars) VALUES (?, 'custom', ?)
-    ON CONFLICT(user_id) DO UPDATE SET mode='custom', custom_chars=excluded.custom_chars
-    """, (user_id, custom_chars))
+    db.execute(
+        "INSERT INTO user_filters(user_id, mode, custom_chars) VALUES (?, 'custom', ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET mode='custom', custom_chars=excluded.custom_chars",
+        (user_id, custom_chars)
+    )
     db.commit()
 
 
@@ -295,7 +297,6 @@ async def business_message_handler(message: Message):
         return
 
     if is_me:
-        # Проверка ожидания ввода кастомных символов для фильтра
         user_id = message.from_user.id
         state_key = f"waiting_chars_{user_id}"
         if getattr(bot, state_key, False):
@@ -515,7 +516,7 @@ async def deleted_messages_handler(update: BusinessMessagesDeleted):
                         elif c_type == "audio":
                             await bot.send_audio(chat_id=chat_id, audio=media_id, caption=m_text, business_connection_id=cid)
                         elif c_type == "document":
-                            await bot.send_document(chat_id=chat_id, document=media_id, caption=m_text, business_connection_id=cid)
+                            await bot.send_document(chat_id=chat_id, document=media_id, business_connection_id=cid)
                     elif m_text:
                         await bot.send_message(chat_id=chat_id, text=m_text, business_connection_id=cid)
                 except TelegramAPIError:
@@ -606,7 +607,6 @@ async def unmute_button(callback: CallbackQuery):
         pass
 
 
-# Генератор юзернеймов с поддержкой кастомных обязательных букв и цифр
 def generate_username(mode="letters_only", custom_chars=""):
     vowels = "aeiou"
     consonants = "bcdfghjklmnpqrstvwxyz"
@@ -629,7 +629,6 @@ def generate_username(mode="letters_only", custom_chars=""):
         random.shuffle(candidate)
         base = "".join(candidate)
     elif mode == "custom" and custom_chars:
-        # Если заданы кастомные символы, встраиваем их в случайную позицию 5-значного юзернейма
         chars = list(custom_chars.lower())
         while len(chars) < 5:
             chars.append(random.choice(consonants + string.digits))
@@ -644,27 +643,23 @@ def generate_username(mode="letters_only", custom_chars=""):
     return base
 
 
-# Жесткая двойная проверка: Telegram API + официальный аукцион Fragment
 async def check_username_free(username: str) -> bool:
-    # 1. Проверка через официальный Telegram API (get_chat)
     try:
         await bot.get_chat(f"@{username}")
-        return False  # Если чат найден — имя занято
+        return False
     except TelegramAPIError as e:
         err_msg = str(e).lower()
         if not ("chat not found" in err_msg or "username invalid" in err_msg or "not found" in err_msg):
-            return False  # Если ошибка не связана со свободой аккаунта, отсекаем
+            return False
 
-    # 2. Двойной контроль: проверка по базе аукционов Fragment (чтобы юз не был выставлен на продажу)
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(f"https://fragment.com/username/{username}", timeout=3) as resp:
                 html = await resp.text()
-                # Если на Fragment страница сообщает, что имя занято, продается или на аукционе
                 if "is taken" in html or "Auction" in html or "bidding" in html or "Telegram Username" in html and "Unavailable" in html:
                     return False
     except Exception:
-        pass  # Если Fragment недоступен, полагаемся на результат Telegram API
+        pass
 
     return True
 
@@ -719,7 +714,6 @@ async def cb_next_variant(callback: CallbackQuery):
     found = False
     target_username = ""
     
-    # Интенсивный перебор до нахождения абсолютно свободного имени
     for _ in range(80):
         candidate = generate_username(mode, custom_chars)
         if await check_username_free(candidate):
