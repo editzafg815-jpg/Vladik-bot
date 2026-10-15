@@ -422,19 +422,13 @@ def generate_username(mode="letters_only", custom_chars=""):
     consonants = "bcdfghjklmnpqrstvwxz"
     
     if mode == "letters_only":
-        length = random.choice([4, 5, 5, 6])
-        if length == 4:
-            return "".join(random.choices(consonants, k=1) + random.choices(vowels, k=1) + random.choices(consonants, k=2))
-        elif length == 5:
-            c1 = random.choice(consonants)
-            v1 = random.choice(vowels)
-            c2 = random.choice(consonants)
-            v2 = random.choice(vowels)
-            c3 = random.choice(consonants)
-            return f"{c1}{v1}{c2}{v2}{c3}"
-        else:
-            return "".join(random.choices(consonants + vowels, k=6))
-            
+        c1 = random.choice(consonants)
+        v1 = random.choice(vowels)
+        c2 = random.choice(consonants)
+        v2 = random.choice(vowels)
+        c3 = random.choice(consonants)
+        return f"{c1}{v1}{c2}{v2}{c3}"
+        
     elif mode == "with_digit":
         c1 = random.choice(consonants)
         v1 = random.choice(vowels)
@@ -446,14 +440,15 @@ def generate_username(mode="letters_only", custom_chars=""):
         return "".join(cand)
         
     elif mode == "custom" and custom_chars:
-        chars = list(custom_chars.lower())
-        while len(chars) < 5:
-            chars.append(random.choice(consonants))
-        random.shuffle(chars)
-        return "".join(chars[:6])
-        
+        base = custom_chars.strip().lower().replace("@", "")
+        if len(base) >= 5:
+            return base[:5]
+        else:
+            fill = "".join(random.choices(consonants + vowels, k=5 - len(base)))
+            return base + fill
+            
     else:
-        return generate_username("letters_only", custom_chars)
+        return f"{random.choice(consonants)}{random.choice(vowels)}{random.choice(consonants)}{random.choice(vowels)}{random.choice(consonants)}"
 
 
 async def check_username_free(username: str) -> bool:
@@ -536,16 +531,16 @@ async def cb_next_variant(callback: CallbackQuery):
     user_id = callback.from_user.id
     mode, custom_chars = get_user_filter_settings(user_id)
     
-    msg = await callback.message.answer("⚡ Подбираем уникальный свободный юз...")
+    msg = await callback.message.answer("⚡ Ищем 100% свободный ник...")
     
     target_username = ""
     start_time = asyncio.get_event_loop().time()
     
     anim_steps = [
-        "🔄 Перебираем крутые слоги...",
+        "🔄 Перебираем крутые слоги из 5 букв...",
         "🔄 Сканируем базы Telegram...",
-        "⚡ Проверяем Fragment на аукционы...",
-        "💎 Формируем премиум ник..."
+        "⚡ Проверяем Fragment...",
+        "💎 Подбираем уникальный вариант..."
     ]
     
     anim_idx = 0
@@ -568,7 +563,7 @@ async def cb_next_variant(callback: CallbackQuery):
         await asyncio.sleep(0.001)
             
     if not target_username:
-        prefixes = ["zesty", "vortex", "nexus", "lumen", "astral", "zenith", "vertex", "vector", "prime", "apex", "nova", "pulse"]
+        prefixes = ["vimez", "luxen", "astrz", "zenix", "verto", "vecto", "prime", "apexv", "novaz", "pulse"]
         random.shuffle(prefixes)
         for p in prefixes:
             cand = f"{p}{random.choice('aeiouy')}"
@@ -576,7 +571,9 @@ async def cb_next_variant(callback: CallbackQuery):
                 target_username = cand
                 break
         if not target_username:
-            target_username = f"lux{random.randint(100,999)}"
+            consonants = "bcdfghjklmnpqrstvwxz"
+            vowels = "aeiouy"
+            target_username = f"{random.choice(consonants)}{random.choice(vowels)}{random.choice(consonants)}{random.choice(vowels)}{random.choice(consonants)}"
 
     mark_username_used(target_username)
 
@@ -588,7 +585,7 @@ async def cb_next_variant(callback: CallbackQuery):
     caption = (
         "❄️ <b>100% СВОБОДНЫЙ ЮЗЕРНЕЙМ НАЙДЕН</b>\n\n"
         f"👤 <b>@{target_username}</b>\n"
-        f"🚫 Уникальный (рандом, без повторов, можно забирать)\n\n"
+        f"🚫 Уникальный (без повторов, 5 букв, чистый)\n\n"
         "📋 Нажми «Скопировать», чтобы сохранить в буфер."
     )
     
@@ -622,7 +619,7 @@ async def cb_filters(callback: CallbackQuery):
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"{m1}Только буквы (Премиум слоги без цифр)", callback_data="set_mode:letters_only")],
+            [InlineKeyboardButton(text=f"{m1}Только чистые буквы (5 букв, без цифр)", callback_data="set_mode:letters_only")],
             [InlineKeyboardButton(text=f"{m2}Включить буквы с цифрами", callback_data="set_mode:with_digit")],
             [InlineKeyboardButton(text=f"{m4}Свои символы ({custom_chars or 'не задано'})", callback_data="set_custom_prompt")],
             [InlineKeyboardButton(text="🔙 Назад к панели", callback_data="back_to_search")]
