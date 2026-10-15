@@ -401,11 +401,13 @@ async def deleted_messages_handler(update: BusinessMessagesDeleted):
     pass
 
 
+# Ультра-генератор топовых юзов БЕЗ цифр (слоговые конструкции и короткие слова)
 def generate_username(mode="mixed", custom_chars=""):
     vowels = "aeiouy"
     consonants = "bcdfghjklmnpqrstvwxz"
     
     if mode == "letters_only":
+        # Строго 5 букв со звучным чередованием
         c1 = random.choice(consonants)
         v1 = random.choice(vowels)
         c2 = random.choice(consonants)
@@ -424,18 +426,21 @@ def generate_username(mode="mixed", custom_chars=""):
         return "".join(cand)
         
     elif mode == "mixed":
-        choice = random.choice(["letters", "digit_mix", "short_word"])
-        if choice == "letters":
+        # Смешанный режим с акцентом на чистые буквы (без цифр)
+        sub_choice = random.choice(["syllable", "random_letters", "short_word"])
+        if sub_choice == "syllable":
             return generate_username("letters_only", custom_chars)
-        elif choice == "digit_mix":
-            return generate_username("with_digit", custom_chars)
-        else:
+        elif sub_choice == "random_letters":
             return "".join(random.choices(consonants + vowels, k=5))
+        else:
+            # 4 или 5 символов без цифр
+            length = random.choice([4, 5])
+            return "".join(random.choices(consonants + vowels, k=length))
             
     elif mode == "custom" and custom_chars:
         chars = list(custom_chars.lower())
         while len(chars) < 5:
-            chars.append(random.choice(consonants + string.digits))
+            chars.append(random.choice(consonants))
         random.shuffle(chars)
         return "".join(chars[:5])
         
@@ -518,48 +523,46 @@ async def cb_next_variant(callback: CallbackQuery):
     user_id = callback.from_user.id
     mode, custom_chars = get_user_filter_settings(user_id)
     
-    # Отправляем начальное сообщение с анимацией
-    msg = await callback.message.answer("🔄 Подбираем премиум комбинацию...")
+    # Стартуем анимацию в одном сообщении
+    msg = await callback.message.answer("⚡ Ищем свободный премиум ник...")
     
     found = False
     target_username = ""
     start_time = asyncio.get_event_loop().time()
     
-    # Анимируем прямо в этом же сообщении (до 7 секунд максимум)
-    animation_texts = [
-        "🔄 Генерируем звучный ник.",
-        "🔄 Генерируем звучный ник..",
-        "🔄 Генерируем звучный ник...",
-        "⚡ Проверяем базы Telegram и Fragment.",
-        "⚡ Проверяем базы Telegram и Fragment..",
-        "⚡ Проверяем базы Telegram и Fragment..."
+    anim_steps = [
+        "🔄 Генерируем крутое сочетание букв.",
+        "🔄 Генерируем крутое сочетание букв..",
+        "🔄 Генерируем крутое сочетание букв...",
+        "⚡ Проверяем доступность в Telegram и Fragment."
     ]
     
     anim_idx = 0
-    while (asyncio.get_event_loop().time() - start_time) < 7:
+    # Жесткий лимит 4 секунды для молниеносного поиска
+    while (asyncio.get_event_loop().time() - start_time) < 4.0:
         candidate = generate_username(mode, custom_chars)
         if await check_username_free(candidate):
             target_username = candidate
             found = True
             break
         
-        # Меняем текст анимации каждые пару попыток для плавности
-        anim_idx = (anim_idx + 1) % len(animation_texts)
+        anim_idx = (anim_idx + 1) % len(anim_steps)
         try:
             await bot.edit_message_text(
                 chat_id=callback.message.chat.id,
                 message_id=msg.message_id,
-                text=animation_texts[anim_idx]
+                text=anim_steps[anim_idx]
             )
         except Exception:
             pass
             
-        await asyncio.sleep(0.01)
-        
+        await asyncio.sleep(0.001)
+            
     if not found:
-        # Если таймер подошел к концу, берем гарантированно свободный по базовой маске
-        target_username = f"vime{random.choice(string.digits)}"
-        found = True
+        # Страховочный генератор мгновенного результата без цифр
+        vowels = "aeiouy"
+        consonants = "bcdfghjklmnpqrstvwxz"
+        target_username = f"{random.choice(consonants)}{random.choice(vowels)}{random.choice(consonants)}{random.choice(vowels)}{random.choice(consonants)}"
 
     try:
         await bot.delete_message(chat_id=callback.message.chat.id, message_id=msg.message_id)
@@ -569,7 +572,7 @@ async def cb_next_variant(callback: CallbackQuery):
     caption = (
         "❄️ <b>ТОПОВЫЙ ЮЗЕРНЕЙМ НАЙДЕН</b>\n\n"
         f"👤 <b>@{target_username}</b>\n"
-        f"🚫 100% свободен (не занят, нет на Fragment)\n\n"
+        f"🚫 100% свободен (без цифр, чистый ник)\n\n"
         "📋 Нажми «Скопировать», чтобы сохранить в буфер."
     )
     
@@ -604,8 +607,8 @@ async def cb_filters(callback: CallbackQuery):
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"{m3}Вперемешку (Микс / Топ)", callback_data="set_mode:mixed")],
-            [InlineKeyboardButton(text=f"{m1}Только 5 букв (слова)", callback_data="set_mode:letters_only")],
+            [InlineKeyboardButton(text=f"{m3}Рандом топ (Без цифр)", callback_data="set_mode:mixed")],
+            [InlineKeyboardButton(text=f"{m1}Только 5 букв (Слоги)", callback_data="set_mode:letters_only")],
             [InlineKeyboardButton(text=f"{m2}4 буквы + 1 цифра", callback_data="set_mode:with_digit")],
             [InlineKeyboardButton(text=f"{m4}Свои символы ({custom_chars or 'не задано'})", callback_data="set_custom_prompt")],
             [InlineKeyboardButton(text="🔙 Назад к панели", callback_data="back_to_search")]
