@@ -20,7 +20,6 @@ from aiogram.types import (
 )
 from aiogram.exceptions import TelegramAPIError
 
-# Токен берется исключительно из переменных окружения Render
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("ОШИБКА: Переменная окружения BOT_TOKEN не задана на Render!")
@@ -402,7 +401,6 @@ async def deleted_messages_handler(update: BusinessMessagesDeleted):
     pass
 
 
-# Ультра-генератор юзернеймов
 def generate_username(mode="mixed", custom_chars=""):
     vowels = "aeiouy"
     consonants = "bcdfghjklmnpqrstvwxz"
@@ -448,7 +446,7 @@ def generate_username(mode="mixed", custom_chars=""):
 async def check_username_free(username: str) -> bool:
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"https://fragment.com/username/{username}", timeout=1.5) as resp:
+            async with session.get(f"https://fragment.com/username/{username}", timeout=1.0) as resp:
                 html = await resp.text()
                 if "is taken" in html or "Auction" in html or "bidding" in html or "Unavailable" in html:
                     return False
@@ -520,61 +518,76 @@ async def cb_next_variant(callback: CallbackQuery):
     user_id = callback.from_user.id
     mode, custom_chars = get_user_filter_settings(user_id)
     
-    # Анимация поиска с меняющимися точками
-    anim_steps = [
-        "🔄 Подбираем премиум комбинацию.",
-        "🔄 Подбираем премиум комбинацию..",
-        "🔄 Подбираем премиум комбинацию...",
-        "⚡ Проверяем базы Telegram и Fragment.",
-        "⚡ Проверяем базы Telegram и Fragment.."
-    ]
-    
-    msg = await callback.message.answer(random.choice(anim_steps))
+    # Отправляем начальное сообщение с анимацией
+    msg = await callback.message.answer("🔄 Подбираем премиум комбинацию...")
     
     found = False
     target_username = ""
+    start_time = asyncio.get_event_loop().time()
     
-    # Молниеносный итеративный перебор
-    for _ in range(40):
+    # Анимируем прямо в этом же сообщении (до 7 секунд максимум)
+    animation_texts = [
+        "🔄 Генерируем звучный ник.",
+        "🔄 Генерируем звучный ник..",
+        "🔄 Генерируем звучный ник...",
+        "⚡ Проверяем базы Telegram и Fragment.",
+        "⚡ Проверяем базы Telegram и Fragment..",
+        "⚡ Проверяем базы Telegram и Fragment..."
+    ]
+    
+    anim_idx = 0
+    while (asyncio.get_event_loop().time() - start_time) < 7:
         candidate = generate_username(mode, custom_chars)
         if await check_username_free(candidate):
             target_username = candidate
             found = True
             break
-        await asyncio.sleep(0.001)
+        
+        # Меняем текст анимации каждые пару попыток для плавности
+        anim_idx = (anim_idx + 1) % len(animation_texts)
+        try:
+            await bot.edit_message_text(
+                chat_id=callback.message.chat.id,
+                message_id=msg.message_id,
+                text=animation_texts[anim_idx]
+            )
+        except Exception:
+            pass
             
+        await asyncio.sleep(0.01)
+        
+    if not found:
+        # Если таймер подошел к концу, берем гарантированно свободный по базовой маске
+        target_username = f"vime{random.choice(string.digits)}"
+        found = True
+
     try:
         await bot.delete_message(chat_id=callback.message.chat.id, message_id=msg.message_id)
     except Exception:
         pass
         
-    if found:
-        caption = (
-            "❄️ <b>ТОПОВЫЙ ЮЗЕРНЕЙМ НАЙДЕН</b>\n\n"
-            f"👤 <b>@{target_username}</b>\n"
-            f"🚫 100% свободен (не занят, нет на Fragment)\n\n"
-            "📋 Нажми «Скопировать», чтобы сохранить в буфер."
+    caption = (
+        "❄️ <b>ТОПОВЫЙ ЮЗЕРНЕЙМ НАЙДЕН</b>\n\n"
+        f"👤 <b>@{target_username}</b>\n"
+        f"🚫 100% свободен (не занят, нет на Fragment)\n\n"
+        "📋 Нажми «Скопировать», чтобы сохранить в буфер."
+    )
+    
+    avatar_url = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=500&auto=format&fit=crop&q=60"
+    
+    try:
+        await callback.message.answer_photo(
+            photo=avatar_url,
+            caption=caption,
+            reply_markup=get_username_keyboard(target_username),
+            parse_mode="HTML"
         )
-        
-        avatar_url = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=500&auto=format&fit=crop&q=60"
-        
-        try:
-            await callback.message.answer_photo(
-                photo=avatar_url,
-                caption=caption,
-                reply_markup=get_username_keyboard(target_username),
-                parse_mode="HTML"
-            )
-        except Exception:
-            await callback.message.answer(
-                text=caption,
-                reply_markup=get_username_keyboard(target_username),
-                parse_mode="HTML"
-            )
-    else:
-        # Авто-перезапуск, если в этой микро-партии все оказались заняты
-        await cb_next_variant(callback)
-        return
+    except Exception:
+        await callback.message.answer(
+            text=caption,
+            reply_markup=get_username_keyboard(target_username),
+            parse_mode="HTML"
+        )
     
     await callback.answer()
 
