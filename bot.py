@@ -72,7 +72,6 @@ CREATE TABLE IF NOT EXISTS messages(
 )
 """)
 
-# Таблица для хранения выбранных пользователем фильтров и кастомных символов
 db.execute("""
 CREATE TABLE IF NOT EXISTS user_filters(
     user_id INTEGER PRIMARY KEY,
@@ -516,7 +515,7 @@ async def deleted_messages_handler(update: BusinessMessagesDeleted):
                         elif c_type == "audio":
                             await bot.send_audio(chat_id=chat_id, audio=media_id, caption=m_text, business_connection_id=cid)
                         elif c_type == "document":
-                            await bot.send_document(chat_id=chat_id, document=media_id, business_connection_id=cid)
+                            await bot.send_document(chat_id=chat_id, document=media_id, caption=m_text, business_connection_id=cid)
                     elif m_text:
                         await bot.send_message(chat_id=chat_id, text=m_text, business_connection_id=cid)
                 except TelegramAPIError:
@@ -611,36 +610,42 @@ def generate_username(mode="letters_only", custom_chars=""):
     vowels = "aeiou"
     consonants = "bcdfghjklmnpqrstvwxyz"
     
-    base = ""
     if mode == "letters_only":
+        # Крутые слоговые сочетания из 5 букв
         c1 = random.choice(consonants)
         v1 = random.choice(vowels)
         c2 = random.choice(consonants)
         v2 = random.choice(vowels)
         c3 = random.choice(consonants)
-        base = f"{c1}{v1}{c2}{v2}{c3}"
+        return f"{c1}{v1}{c2}{v2}{c3}"
+        
     elif mode == "with_digit":
+        # 4 буквы + 1 стильная цифра
         c1 = random.choice(consonants)
         v1 = random.choice(vowels)
         c2 = random.choice(consonants)
         v2 = random.choice(vowels)
         digit = random.choice(string.digits)
-        candidate = list(f"{c1}{v1}{c2}{v2}{digit}")
-        random.shuffle(candidate)
-        base = "".join(candidate)
+        cand = list(f"{c1}{v1}{c2}{v2}{digit}")
+        random.shuffle(cand)
+        return "".join(cand)
+        
+    elif mode == "mixed":
+        # Смешанный режим: рандомно слоговое слово или с цифрой
+        if random.random() < 0.5:
+            return generate_username("letters_only", custom_chars)
+        else:
+            return generate_username("with_digit", custom_chars)
+            
     elif mode == "custom" and custom_chars:
         chars = list(custom_chars.lower())
         while len(chars) < 5:
             chars.append(random.choice(consonants + string.digits))
         random.shuffle(chars)
-        base = "".join(chars[:5])
+        return "".join(chars[:5])
+        
     else:
-        if random.random() < 0.7:
-            return generate_username("letters_only", custom_chars)
-        else:
-            return generate_username("with_digit", custom_chars)
-            
-    return base
+        return generate_username("letters_only", custom_chars)
 
 
 async def check_username_free(username: str) -> bool:
@@ -656,7 +661,7 @@ async def check_username_free(username: str) -> bool:
         async with aiohttp.ClientSession() as session:
             async with session.get(f"https://fragment.com/username/{username}", timeout=3) as resp:
                 html = await resp.text()
-                if "is taken" in html or "Auction" in html or "bidding" in html or "Telegram Username" in html and "Unavailable" in html:
+                if "is taken" in html or "Auction" in html or "bidding" in html or ("Telegram Username" in html and "Unavailable" in html):
                     return False
     except Exception:
         pass
@@ -698,7 +703,7 @@ async def start_handler(message: Message):
         "📋 <code>.clone</code> / <code>.unclone</code> — клонирование\n"
         "🚀 <code>.spam</code> — ультраспам\n"
         "⚡ <code>.snos</code> — жесткий репорт-модуль\n\n"
-        "👇 <b>Нажми кнопку ниже для поиска свободных премиум юзов (5 символов):</b>",
+        "👇 <b>Нажми кнопку ниже для поиска свободных премиум юзов:</b>",
         reply_markup=keyboard,
         parse_mode="HTML"
     )
@@ -709,12 +714,12 @@ async def cb_next_variant(callback: CallbackQuery):
     user_id = callback.from_user.id
     mode, custom_chars = get_user_filter_settings(user_id)
     
-    msg = await callback.message.answer("🔄 Ищу 100% свободный юз (проверка Telegram + Fragment)...")
+    msg = await callback.message.answer("🔄 Подбираю топовые свободные сочетания...")
     
     found = False
     target_username = ""
     
-    for _ in range(80):
+    for _ in range(150):
         candidate = generate_username(mode, custom_chars)
         if await check_username_free(candidate):
             target_username = candidate
@@ -729,10 +734,9 @@ async def cb_next_variant(callback: CallbackQuery):
         
     if found:
         caption = (
-            "❄️ <b>ЮЗЕРНЕЙМ НАЙДЕН (100% СВОБОДЕН)</b>\n\n"
+            "❄️ <b>ТОПОВЫЙ ЮЗЕРНЕЙМ НАЙДЕН (100% СВОБОДЕН)</b>\n\n"
             f"👤 <b>@{target_username}</b>\n"
-            f"🚫 Не занят и отсутствует на Fragment\n"
-            f"• 5 символов\n\n"
+            f"🚫 Чистый (нет на Fragment / не занят)\n\n"
             "🔄 Нажми «Скопировать», чтобы бот прислал его текст."
         )
         
@@ -752,7 +756,7 @@ async def cb_next_variant(callback: CallbackQuery):
                 parse_mode="HTML"
             )
     else:
-        await callback.message.answer("⚠️ Свободный юзернейм под твои фильтры не найден с этой попытки. Нажми «🔍 Искать новый юз» еще раз!")
+        await callback.message.answer("⚠️ Свободный юзернейм не найден с этой попытки. Нажми «🔍 Искать новый юз» еще раз!")
     
     await callback.answer()
 
@@ -764,22 +768,24 @@ async def cb_filters(callback: CallbackQuery):
     
     m1 = "✅ " if current_mode == "letters_only" else ""
     m2 = "✅ " if current_mode == "with_digit" else ""
-    m3 = "✅ " if current_mode == "custom" else ""
+    m3 = "✅ " if current_mode == "mixed" else ""
+    m4 = "✅ " if current_mode == "custom" else ""
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"{m1}Только 5 букв", callback_data="set_mode:letters_only")],
+            [InlineKeyboardButton(text=f"{m1}Только 5 букв (слова)", callback_data="set_mode:letters_only")],
             [InlineKeyboardButton(text=f"{m2}4 буквы + 1 цифра", callback_data="set_mode:with_digit")],
-            [InlineKeyboardButton(text=f"{m3}Свои буквы/цифры ({custom_chars or 'не задано'})", callback_data="set_custom_prompt")],
+            [InlineKeyboardButton(text=f"{m3}Вперемешку (Микс)", callback_data="set_mode:mixed")],
+            [InlineKeyboardButton(text=f"{m4}Свои символы ({custom_chars or 'не задано'})", callback_data="set_custom_prompt")],
             [InlineKeyboardButton(text="🔙 Назад к поиску", callback_data="back_to_search")]
         ]
     )
     
     text_content = (
         "⚙️ <b>Меню фильтров поиска юзернеймов:</b>\n\n"
-        "Выбери формат генерации. Бот проверяет полнейшую свободу имён (без аукционов Fragment).\n\n"
+        "Выбери стиль генерации. Бот проверяет абсолютную свободу имён.\n\n"
         f"Текущий режим: <b>{current_mode}</b>\n"
-        f"Обязательные символы: <b>{custom_chars or 'нет'}</b>"
+        f"Свои символы: <b>{custom_chars or 'нет'}</b>"
     )
 
     try:
@@ -809,7 +815,7 @@ async def cb_set_mode(callback: CallbackQuery):
 async def cb_set_custom_prompt(callback: CallbackQuery):
     user_id = callback.from_user.id
     setattr(bot, f"waiting_chars_{user_id}", True)
-    await callback.message.answer("✏️ <b>Напиши в чат буквы или цифры</b>, которые обязательно должны содержаться в генерируемом юзернейме (например: <code>vip</code> или <code>777</code>):", parse_mode="HTML")
+    await callback.message.answer("✏️ <b>Напиши в чат буквы или цифры</b>, которые обязательно должны быть в юзернейме (например: <code>vip</code> или <code>777</code>):", parse_mode="HTML")
     await callback.answer()
 
 
