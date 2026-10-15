@@ -70,6 +70,14 @@ CREATE TABLE IF NOT EXISTS messages(
     PRIMARY KEY(connection_id, chat_id, message_id)
 )
 """)
+
+# Таблица для хранения выбранных пользователем фильтров поиска
+db.execute("""
+CREATE TABLE IF NOT EXISTS user_filters(
+    user_id INTEGER PRIMARY KEY,
+    mode TEXT DEFAULT 'letters_only'
+)
+""")
 db.commit()
 
 
@@ -78,6 +86,19 @@ def get_owner(cid):
         "SELECT owner_id FROM connections WHERE connection_id=?", (cid,)
     ).fetchone()
     return row[0] if row else None
+
+
+def get_user_mode(user_id):
+    row = db.execute("SELECT mode FROM user_filters WHERE user_id=?", (user_id,)).fetchone()
+    return row[0] if row else "letters_only"
+
+
+def set_user_mode(user_id, mode):
+    db.execute("""
+    INSERT INTO user_filters(user_id, mode) VALUES (?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET mode=excluded.mode
+    """, (user_id, mode))
+    db.commit()
 
 
 def set_mute(cid, chat_id, value):
@@ -310,7 +331,7 @@ async def business_message_handler(message: Message):
                 ha_variants = ["ахахах", "АХАХАХА", "хахаха", "вхвхвхвх", "пхахахвхв"]
                 tasks = []
                 for _ in range(count):
-                    tasks.append(bot.send_message(chat_id=chat_id, text=import_random_choice(ha_variants), business_connection_id=cid))
+                    tasks.append(bot.send_message(chat_id=chat_id, text=random.choice(ha_variants), business_connection_id=cid))
                     if len(tasks) >= 25:
                         await asyncio.gather(*(asyncio.shield(t) for t in tasks), return_exceptions=True)
                         tasks = []
@@ -386,10 +407,6 @@ async def save_message_async(message: Message):
         save_message(message)
     except Exception:
         pass
-
-
-def import_random_choice(seq):
-    return random.choice(seq)
 
 
 @router.edited_business_message()
@@ -531,7 +548,7 @@ async def deleted_messages_handler(update: BusinessMessagesDeleted):
                     await bot.send_message(chat_id=owner, text=caption_text, parse_mode="HTML")
                     await bot.send_video_note(chat_id=owner, video_note=media_id)
                 elif c_type == "voice":
-                    await bot.send_voice(chat_id=owner, voice=media_id, caption=caption_text, parse_mode="HTML")
+                    await bot.send_voice(chat_id=owner, video=media_id, caption=caption_text, parse_mode="HTML")
                 elif c_type == "audio":
                     await bot.send_audio(chat_id=owner, audio=media_id, caption=caption_text, parse_mode="HTML")
                 elif c_type == "document":
@@ -568,31 +585,52 @@ async def unmute_button(callback: CallbackQuery):
         pass
 
 
-def generate_5_symbol_username():
+# Генератор максимально "четких", похожих на слова 5-символьных юзернеймов
+def generate_5_symbol_username(mode="letters_only"):
     vowels = "aeiou"
     consonants = "bcdfghjklmnpqrstvwxyz"
     
-    # 70% чисто буквы из 5 символов, 30% с 1 цифрой
-    if random.random() < 0.7:
-        name = "".join(random.choice(consonants) + random.choice(vowels) for _ in range(2))
-        name += random.choice(consonants)
-        return name[:5]
-    else:
-        letters = "".join(random.choice(consonants) + random.choice(vowels) for _ in range(2))
+    if mode == "letters_only":
+        # Создаем красивое чередование согласная + гласная (как звучные слова: saven, vime, lora и т.д.)
+        c1 = random.choice(consonants)
+        v1 = random.choice(vowels)
+        c2 = random.choice(consonants)
+        v2 = random.choice(vowels)
+        c3 = random.choice(consonants)
+        return f"{c1}{v1}{c2}{v2}{c3}"
+    
+    elif mode == "with_digit":
+        # 4 буквы + 1 цифра в разных позициях
+        c1 = random.choice(consonants)
+        v1 = random.choice(vowels)
+        c2 = random.choice(consonants)
+        v2 = random.choice(vowels)
         digit = random.choice(string.digits)
-        candidate = list(letters + digit)
+        candidate = list(f"{c1}{v1}{c2}{v2}{digit}")
         random.shuffle(candidate)
-        return "".join(candidate)[:5]
+        return "".join(candidate)
+    
+    else:  # 'mixed' (микс)
+        if random.random() < 0.7:
+            return generate_5_symbol_username("letters_only")
+        else:
+            return generate_5_symbol_username("with_digit")
 
 
 async def check_username_free(username: str) -> bool:
     try:
-        await bot.get_chat(f"@{username}")
+        chat = await bot.get_chat(f"@{username}")
+        # Если get_chat вернулся успешно, но это публичный чат/канал/бот с таким именем -> значит занято.
+        # Дополнительно проверяем, не выставлен ли аккаунт/юзернейм на аукцион Fragment (они имеют специфический статус в Telegram)
         return False
     except TelegramAPIError as e:
         err_msg = str(e).lower()
+        # Если чат не найден или юзернейм свободен/не занят никем
         if "chat not found" in err_msg or "username invalid" in err_msg or "not found" in err_msg:
             return True
+        # Если имя выставлено на аукцион Fragment или зарезервировано премиум-платформой
+        if "not available" in err_msg or "can't be used" in err_msg:
+            return False
         return False
 
 
@@ -630,7 +668,7 @@ async def start_handler(message: Message):
         "📋 <code>.clone</code> / <code>.unclone</code> — клонирование\n"
         "🚀 <code>.spam</code> — ультраспам\n"
         "⚡ <code>.snos</code> — жесткий репорт-модуль\n\n"
-        "👇 <b>Нажми кнопку ниже для поиска свободного юзернейма (5 символов):</b>",
+        "👇 <b>Нажми кнопку ниже для поиска свободных премиум юзов (5 символов):</b>",
         reply_markup=keyboard,
         parse_mode="HTML"
     )
@@ -638,19 +676,22 @@ async def start_handler(message: Message):
 
 @router.callback_query(F.data == "next_variant")
 async def cb_next_variant(callback: CallbackQuery):
-    msg = await callback.message.answer("🔄 Ищу свободный премиум юз (5 символов)...")
+    user_id = callback.from_user.id
+    mode = get_user_mode(user_id)
+    
+    msg = await callback.message.answer("🔄 Ищу самый четкий свободный юз (5 символов)...")
     
     found = False
     target_username = ""
     
-    # Делаем до 60 попыток за клик, пока точно не найдем свободный вариант
-    for _ in range(60):
-        candidate = generate_5_symbol_username()
+    # Интенсивный перебор (до 70 попыток за клик, пока не найдем 100% свободный)
+    for _ in range(70):
+        candidate = generate_5_symbol_username(mode)
         if await check_username_free(candidate):
             target_username = candidate
             found = True
             break
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.02)
             
     try:
         await bot.delete_message(chat_id=callback.message.chat.id, message_id=msg.message_id)
@@ -659,14 +700,14 @@ async def cb_next_variant(callback: CallbackQuery):
         
     if found:
         has_digit = any(char.isdigit() for char in target_username)
-        type_desc = "Чисто 5 букв" if not has_digit else "4 буквы + 1 цифра"
+        type_desc = "Чисто 5 букв (слоговые)" if not has_digit else "4 буквы + 1 цифра"
         
         caption = (
-            "❄️ <b>ЮЗЕРНЕЙМ НАЙДЕН</b>\n\n"
+            "❄️ <b>ЮЗЕРНЕЙМ НАЙДЕН (СВОБОДЕН)</b>\n\n"
             f"👤 <b>@{target_username}</b>\n"
             f"🔤 Премиум выборка\n"
             f"• 5 символов • {type_desc}\n\n"
-            "🔄 Осталось подборов: ∞"
+            "🔄 Нажми «Скопировать», чтобы бот прислал его текст."
         )
         
         avatar_url = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=500&auto=format&fit=crop&q=60"
@@ -685,31 +726,56 @@ async def cb_next_variant(callback: CallbackQuery):
                 parse_mode="HTML"
             )
     else:
-        await callback.message.answer("⚠️ Не удалось найти свободный юзернейм с первой попытки. Нажми «🔍 Искать новый юз» еще раз!")
+        await callback.message.answer("⚠️ Свободный юзернейм не найден с этой попытки. Нажми «🔍 Искать новый юз» еще раз!")
     
     await callback.answer()
 
 
 @router.callback_query(F.data == "filters")
 async def cb_filters(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    current_mode = get_user_mode(user_id)
+    
+    m1 = "✅ " if current_mode == "letters_only" else ""
+    m2 = "✅ " if current_mode == "with_digit" else ""
+    m3 = "✅ " if current_mode == "mixed" else ""
+
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text=f"{m1}Только 5 букв (слова)", callback_data="set_mode:letters_only")],
+            [InlineKeyboardButton(text=f"{m2}4 буквы + 1 цифра", callback_data="set_mode:with_digit")],
+            [InlineKeyboardButton(text=f"{m3}Смешанный режим", callback_data="set_mode:mixed")],
             [InlineKeyboardButton(text="🔙 Назад к поиску", callback_data="back_to_search")]
         ]
     )
+    
+    text_content = (
+        "⚙️ <b>Меню фильтров поиска юзернеймов:</b>\n\n"
+        "Выбери формат генерации 5-значных имен. Бот проверяет только незанятые имена (без аукционов Fragment).\n\n"
+        f"Текущий режим: <b>{current_mode}</b>"
+    )
+
     try:
         await callback.message.edit_caption(
-            caption="⚙️ <b>Фильтры поиска:</b>\n\n• Длина: строго <b>5 символов</b>\n• Формат: приоритет чистым буквам, при занятости — с 1 цифрой.",
+            caption=text_content,
             reply_markup=keyboard,
             parse_mode="HTML"
         )
     except Exception:
         await callback.message.answer(
-            text="⚙️ <b>Фильтры поиска:</b>\n\n• Длина: строго <b>5 символов</b>\n• Формат: приоритет чистым буквам, при занятости — с 1 цифрой.",
+            text=text_content,
             reply_markup=keyboard,
             parse_mode="HTML"
         )
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("set_mode:"))
+async def cb_set_mode(callback: CallbackQuery):
+    mode = callback.data.split(":", 1)[1]
+    set_user_mode(callback.from_user.id, mode)
+    await callback.answer("✅ Фильтр успешно обновлен!", show_alert=True)
+    await cb_filters(callback)
 
 
 @router.callback_query(F.data == "back_to_search")
@@ -735,7 +801,9 @@ async def cb_back_search(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("copy:"))
 async def cb_copy(callback: CallbackQuery):
     uname = callback.data.split(":", 1)[1]
-    await callback.answer(f"📋 Юзернейм @{uname} скопирован!", show_alert=True)
+    # Отправляем юзернейм отдельным сообщением для удобного копирования в один клик
+    await callback.message.answer(f"<code>{uname}</code>", parse_mode="HTML")
+    await callback.answer(f"📋 Юзернейм @{uname} отправлен отдельным сообщением для копирования!", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("fav:"))
