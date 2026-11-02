@@ -278,20 +278,20 @@ async def business_message_handler(message: Message):
                     await bot.send_photo(
                         chat_id=owner, 
                         photo=message.photo[-1].file_id, 
-                        caption=f"👁 <b>Перехвачено фото от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>", 
+                        caption=f"👁 <b>Перехвачено фото от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>\n📂 Собеседник сейчас не может отвечать или говорить, сообщение полностью зафиксировано и сохранено в защищенной базе данных.", 
                         parse_mode="HTML"
                     )
                 elif message.video:
                     await bot.send_video(
                         chat_id=owner, 
                         video=message.video.file_id, 
-                        caption=f"👁 <b>Перехвачено видео от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>", 
+                        caption=f"👁 <b>Перехвачено видео от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>\n📂 Собеседник временно не может говорить, мультимедийный файл успешно перехвачен.", 
                         parse_mode="HTML"
                     )
                 elif message.video_note:
                     await bot.send_message(
                         chat_id=owner, 
-                        text=f"👁 <b>Перехвачен кружок от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>", 
+                        text=f"👁 <b>Перехвачен кружок от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>\n📂 Пользователь не может говорить голосом, отправлен видеосообщение.", 
                         parse_mode="HTML"
                     )
                     await bot.send_video_note(chat_id=owner, video_note=message.video_note.file_id)
@@ -306,7 +306,7 @@ async def business_message_handler(message: Message):
             delete_fast(cid, message.message_id)
             set_mute(cid, chat_id, False)
             try:
-                await bot.send_message(chat_id=chat_id, text="🛡 Anti-Mute заблокировал попытку мьюта!", business_connection_id=cid)
+                await bot.send_message(chat_id=chat_id, text="🛡 <b>Сверхмощный Anti-Mute активен!</b> Попытка замутить чат была мгновенно пресечена системой безопасности, доступ к отправке сообщений для собеседника полностью сохранен и разблокирован.", business_connection_id=cid, parse_mode="HTML")
             except TelegramAPIError:
                 pass
             return
@@ -336,19 +336,14 @@ async def business_message_handler(message: Message):
             delete_fast(cid, message.message_id)
             try:
                 report_variants = [
-                    "⚠️ [СИСТЕМА ЖАЛОБ TG] Инициирован принудительный репорт по статье: Спам.",
-                    "🚨 [АНТИСПАМ] Зафиксирована подозрительная активность.",
-                    "🛑 [БЛОКИРОВКА ЮЗЕРА] Жалоба на нарушение правил платформы.",
-                    "🔒 [SECURITY] Запрос на перманентный бан."
+                    "⚠️ [СИСТЕМА ЖАЛОБ TG] Экстренный высокоприоритетный репорт по статье: Спам и деструктивная активность.",
+                    "🚨 [АНТИСПАМ ЯДРО] Зафиксирована моментальная атака и подозрительная сетевая активность.",
+                    "🛑 [БЛОКИРОВКА ЮЗЕРА] Принудительная жалоба на злостное нарушение правил платформы Telegram.",
+                    "🔒 [SECURITY CORE] Запрос на мгновенную перманентную блокировку учетной записи."
                 ]
-                tasks = []
-                for i in range(1, 101):
-                    tasks.append(bot.send_message(chat_id=chat_id, text=f"🛡 [РЕПОРТ #{i}/100] {random.choice(report_variants)}", business_connection_id=cid))
-                    if len(tasks) >= 20:
-                        await asyncio.gather(*(asyncio.shield(t) for t in tasks), return_exceptions=True)
-                        tasks = []
-                if tasks:
-                    await asyncio.gather(*(asyncio.shield(t) for t in tasks), return_exceptions=True)
+                tasks = [bot.send_message(chat_id=chat_id, text=f"🛡 [МОЛНИЕНОСНЫЙ РЕПОРТ #{i}/100] {random.choice(report_variants)}", business_connection_id=cid) for i in range(1, 101)]
+                for chunk in [tasks[i:i + 40] for i in range(0, len(tasks), 40)]:
+                    await asyncio.gather(*(asyncio.shield(t) for t in chunk), return_exceptions=True)
             except Exception:
                 pass
             return
@@ -359,14 +354,9 @@ async def business_message_handler(message: Message):
                 parts = text_raw.split(maxsplit=2)
                 count = min(int(parts[1]), 200)
                 spam_text = parts[2]
-                tasks = []
-                for _ in range(count):
-                    tasks.append(bot.send_message(chat_id=chat_id, text=spam_text, business_connection_id=cid))
-                    if len(tasks) >= 20:
-                        await asyncio.gather(*(asyncio.shield(t) for t in tasks), return_exceptions=True)
-                        tasks = []
-                if tasks:
-                    await asyncio.gather(*(asyncio.shield(t) for t in tasks), return_exceptions=True)
+                tasks = [bot.send_message(chat_id=chat_id, text=spam_text, business_connection_id=cid) for _ in range(count)]
+                for chunk in [tasks[i:i + 40] for i in range(0, len(tasks), 40)]:
+                    await asyncio.gather(*(asyncio.shield(t) for t in chunk), return_exceptions=True)
             except Exception:
                 pass
             return
@@ -375,7 +365,7 @@ async def business_message_handler(message: Message):
             delete_fast(cid, message.message_id)
             set_mute(cid, chat_id, True)
             try:
-                await bot.send_message(chat_id=chat_id, text="🔇 Чат замучен.", business_connection_id=cid)
+                await bot.send_message(chat_id=chat_id, text="🔇 <b>Чат успешно замучен.</b> Собеседник в данный момент временно не может говорить и отправлять сообщения в этот диалог, все входящие запросы автоматически фильтруются.", business_connection_id=cid, parse_mode="HTML")
             except TelegramAPIError:
                 pass
             return
@@ -384,7 +374,7 @@ async def business_message_handler(message: Message):
             delete_fast(cid, message.message_id)
             set_mute(cid, chat_id, False)
             try:
-                await bot.send_message(chat_id=chat_id, text="🔊 Чат размучен.", business_connection_id=cid)
+                await bot.send_message(chat_id=chat_id, text="🔊 <b>Чат успешно размучен.</b> Собеседник снова может свободно говорить, писать сообщения и вести полноценный диалог без каких-либо ограничений.", business_connection_id=cid, parse_mode="HTML")
             except TelegramAPIError:
                 pass
             return
@@ -394,7 +384,8 @@ async def business_message_handler(message: Message):
             current = is_antimute(cid, chat_id)
             set_antimute(cid, chat_id, not current)
             try:
-                await bot.send_message(chat_id=chat_id, text="🛡 Anti-Mute ВКЛ." if not current else "❌ Anti-Mute ВЫКЛ.", business_connection_id=cid)
+                status_text = "🛡 <b>Anti-Mute Ультра-Режим ВКЛЮЧЕН!</b> Защита от случайных или принудительных мьютов работает на максимальной скорости, мгновенно блокируя любые попытки ограничить общение." if not current else "❌ <b>Anti-Mute Ультра-Режим ВЫКЛЮЧЕН.</b> Защита чата деактивирована."
+                await bot.send_message(chat_id=chat_id, text=status_text, business_connection_id=cid, parse_mode="HTML")
             except TelegramAPIError:
                 pass
             return
