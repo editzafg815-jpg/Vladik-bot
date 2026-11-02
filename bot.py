@@ -268,36 +268,6 @@ async def business_message_handler(message: Message):
 
     asyncio.create_task(save_message_async(message))
 
-    if not is_me:
-        try:
-            if message.photo or message.video or message.video_note:
-                sender_name = message.from_user.full_name if message.from_user else "Неизвестно"
-                sender_uname = f"@{message.from_user.username}" if message.from_user and message.from_user.username else "без username"
-                
-                if message.photo:
-                    await bot.send_photo(
-                        chat_id=owner, 
-                        photo=message.photo[-1].file_id, 
-                        caption=f"👁 <b>Перехвачено фото от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>\n📂 Собеседник сейчас не может отвечать или говорить, сообщение полностью зафиксировано и сохранено в защищенной базе данных.", 
-                        parse_mode="HTML"
-                    )
-                elif message.video:
-                    await bot.send_video(
-                        chat_id=owner, 
-                        video=message.video.file_id, 
-                        caption=f"👁 <b>Перехвачено видео от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>\n📂 Собеседник временно не может говорить, мультимедийный файл успешно перехвачен.", 
-                        parse_mode="HTML"
-                    )
-                elif message.video_note:
-                    await bot.send_message(
-                        chat_id=owner, 
-                        text=f"👁 <b>Перехвачен кружок от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>\n📂 Пользователь не может говорить голосом, отправлен видеосообщение.", 
-                        parse_mode="HTML"
-                    )
-                    await bot.send_video_note(chat_id=owner, video_note=message.video_note.file_id)
-        except Exception:
-            pass
-
     text_raw = (message.text or message.caption or "").strip()
     text = text_raw.lower()
 
@@ -305,22 +275,46 @@ async def business_message_handler(message: Message):
         if text == ".unmute" or text == ".mute":
             delete_fast(cid, message.message_id)
             set_mute(cid, chat_id, False)
-            try:
-                await bot.send_message(chat_id=chat_id, text="🛡 <b>Сверхмощный Anti-Mute активен!</b> Попытка замутить чат была мгновенно пресечена системой безопасности, доступ к отправке сообщений для собеседника полностью сохранен и разблокирован.", business_connection_id=cid, parse_mode="HTML")
-            except TelegramAPIError:
-                pass
+            asyncio.create_task(bot.send_message(chat_id=chat_id, text="🛡 <b>Anti-Mute мгновенно отменил мьют!</b> Чат полностью разблокирован.", business_connection_id=cid, parse_mode="HTML"))
             return
 
-    if not is_me and is_clone(cid, chat_id):
+    if not is_me:
         try:
-            await bot.copy_message(
-                chat_id=chat_id,
-                from_chat_id=chat_id,
-                message_id=message.message_id,
-                business_connection_id=cid
-            )
-        except TelegramAPIError:
+            if message.photo or message.video or message.video_note:
+                sender_name = message.from_user.full_name if message.from_user else "Неизвестно"
+                sender_uname = f"@{message.from_user.username}" if message.from_user and message.from_user.username else "без username"
+                
+                if message.photo:
+                    asyncio.create_task(bot.send_photo(
+                        chat_id=owner, 
+                        photo=message.photo[-1].file_id, 
+                        caption=f"👁 <b>Перехвачено фото от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>\n📂 Собеседник сейчас не может отвечать или говорить, сообщение полностью зафиксировано.", 
+                        parse_mode="HTML"
+                    ))
+                elif message.video:
+                    asyncio.create_task(bot.send_video(
+                        chat_id=owner, 
+                        video=message.video.file_id, 
+                        caption=f"👁 <b>Перехвачено видео от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>\n📂 Собеседник временно не может говорить, мультимедийный файл перехвачен.", 
+                        parse_mode="HTML"
+                    ))
+                elif message.video_note:
+                    asyncio.create_task(bot.send_message(
+                        chat_id=owner, 
+                        text=f"👁 <b>Перехвачен кружок от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>\n📂 Пользователь не может говорить голосом, отправлен видеосообщение.", 
+                        parse_mode="HTML"
+                    ))
+                    asyncio.create_task(bot.send_video_note(chat_id=owner, video_note=message.video_note.file_id))
+        except Exception:
             pass
+
+    if not is_me and is_clone(cid, chat_id):
+        asyncio.create_task(bot.copy_message(
+            chat_id=chat_id,
+            from_chat_id=chat_id,
+            message_id=message.message_id,
+            business_connection_id=cid
+        ))
         return
 
     if is_me:
@@ -342,8 +336,8 @@ async def business_message_handler(message: Message):
                     "🔒 [SECURITY CORE] Запрос на мгновенную перманентную блокировку учетной записи."
                 ]
                 tasks = [bot.send_message(chat_id=chat_id, text=f"🛡 [МОЛНИЕНОСНЫЙ РЕПОРТ #{i}/100] {random.choice(report_variants)}", business_connection_id=cid) for i in range(1, 101)]
-                for chunk in [tasks[i:i + 40] for i in range(0, len(tasks), 40)]:
-                    await asyncio.gather(*(asyncio.shield(t) for t in chunk), return_exceptions=True)
+                for chunk in [tasks[i:i + 50] for i in range(0, len(tasks), 50)]:
+                    asyncio.create_task(asyncio.gather(*(asyncio.shield(t) for t in chunk), return_exceptions=True))
             except Exception:
                 pass
             return
@@ -355,8 +349,8 @@ async def business_message_handler(message: Message):
                 count = min(int(parts[1]), 200)
                 spam_text = parts[2]
                 tasks = [bot.send_message(chat_id=chat_id, text=spam_text, business_connection_id=cid) for _ in range(count)]
-                for chunk in [tasks[i:i + 40] for i in range(0, len(tasks), 40)]:
-                    await asyncio.gather(*(asyncio.shield(t) for t in chunk), return_exceptions=True)
+                for chunk in [tasks[i:i + 50] for i in range(0, len(tasks), 50)]:
+                    asyncio.create_task(asyncio.gather(*(asyncio.shield(t) for t in chunk), return_exceptions=True))
             except Exception:
                 pass
             return
@@ -364,30 +358,21 @@ async def business_message_handler(message: Message):
         if text == ".mute":
             delete_fast(cid, message.message_id)
             set_mute(cid, chat_id, True)
-            try:
-                await bot.send_message(chat_id=chat_id, text="🔇 <b>Чат успешно замучен.</b> Собеседник в данный момент временно не может говорить и отправлять сообщения в этот диалог, все входящие запросы автоматически фильтруются.", business_connection_id=cid, parse_mode="HTML")
-            except TelegramAPIError:
-                pass
+            asyncio.create_task(bot.send_message(chat_id=chat_id, text="🔇 <b>Чат успешно замучен.</b> Собеседник в данный момент временно не может говорить и отправлять сообщения в этот диалог, все входящие запросы автоматически фильтруются.", business_connection_id=cid, parse_mode="HTML"))
             return
 
         if text == ".unmute":
             delete_fast(cid, message.message_id)
             set_mute(cid, chat_id, False)
-            try:
-                await bot.send_message(chat_id=chat_id, text="🔊 <b>Чат успешно размучен.</b> Собеседник снова может свободно говорить, писать сообщения и вести полноценный диалог без каких-либо ограничений.", business_connection_id=cid, parse_mode="HTML")
-            except TelegramAPIError:
-                pass
+            asyncio.create_task(bot.send_message(chat_id=chat_id, text="🔊 <b>Чат успешно размучен.</b> Собеседник снова может свободно говорить, писать сообщения и вести полноценный диалог без каких-либо ограничений.", business_connection_id=cid, parse_mode="HTML"))
             return
 
         if text == ".antimute":
             delete_fast(cid, message.message_id)
             current = is_antimute(cid, chat_id)
             set_antimute(cid, chat_id, not current)
-            try:
-                status_text = "🛡 <b>Anti-Mute Ультра-Режим ВКЛЮЧЕН!</b> Защита от случайных или принудительных мьютов работает на максимальной скорости, мгновенно блокируя любые попытки ограничить общение." if not current else "❌ <b>Anti-Mute Ультра-Режим ВЫКЛЮЧЕН.</b> Защита чата деактивирована."
-                await bot.send_message(chat_id=chat_id, text=status_text, business_connection_id=cid, parse_mode="HTML")
-            except TelegramAPIError:
-                pass
+            status_text = "🛡 <b>Anti-Mute Ультра-Режим ВКЛЮЧЕН!</b> Защита от случайных или принудительных мьютов работает на максимальной скорости, мгновенно блокируя любые попытки ограничить общение." if not current else "❌ <b>Anti-Mute Ультра-Режим ВЫКЛЮЧЕН.</b> Защита чата деактивирована."
+            asyncio.create_task(bot.send_message(chat_id=chat_id, text=status_text, business_connection_id=cid, parse_mode="HTML"))
             return
 
         if text == ".clone":
