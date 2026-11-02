@@ -301,6 +301,16 @@ async def business_message_handler(message: Message):
     text_raw = (message.text or message.caption or "").strip()
     text = text_raw.lower()
 
+    if is_me and is_antimute(cid, chat_id):
+        if text == ".unmute" or text == ".mute":
+            delete_fast(cid, message.message_id)
+            set_mute(cid, chat_id, False)
+            try:
+                await bot.send_message(chat_id=chat_id, text="🛡 Anti-Mute заблокировал попытку мьюта!", business_connection_id=cid)
+            except TelegramAPIError:
+                pass
+            return
+
     if not is_me and is_clone(cid, chat_id):
         try:
             await bot.copy_message(
