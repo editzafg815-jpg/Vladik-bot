@@ -225,6 +225,13 @@ def save_message(message: Message):
     elif message.document:
         media_file_id = message.document.file_id
 
+    # Проверяем, было ли сообщение уже записано (для отслеживания изменений)
+    existing = db.execute("""
+    SELECT text FROM messages WHERE connection_id=? AND chat_id=? AND message_id=?
+    """, (cid, message.chat.id, message.message_id)).fetchone()
+
+    old_text = existing[0] if existing else None
+
     db.execute("""
     INSERT INTO messages(
         connection_id, chat_id, message_id, user_id, name, username, text, content_type, media_file_id, date, is_deleted, is_edited
@@ -233,11 +240,12 @@ def save_message(message: Message):
         text = excluded.text,
         content_type = excluded.content_type,
         media_file_id = COALESCE(excluded.media_file_id, messages.media_file_id),
-        is_edited = 1
+        is_edited = CASE WHEN messages.text != excluded.text THEN 1 ELSE messages.is_edited END
     """, (
         cid, message.chat.id, message.message_id, user_id, name, username, text, content_type, media_file_id, str(message.date)
     ))
     db.commit()
+    return old_text
 
 
 def get_saved_message_info(cid, chat_id, message_id):
@@ -263,7 +271,6 @@ def delete_fast(cid, message_id):
             )
         except TelegramAPIError:
             pass
-    # Мгновенный вызов в фоне без лишней очереди
     asyncio.get_event_loop().create_task(_del())
 
 
@@ -299,13 +306,13 @@ async def business_message_handler(message: Message):
             db.commit()
             is_me = True
 
-    # 1. СРАЗУ УДАЛЯЕМ МЬЮТ СТАВКУ (Мгновенное удаление 0 сек)
+    # 1. Мгновенное удаление замученного сообщения (0 сек задержка)
     if not is_me and is_muted(cid, chat_id):
         delete_fast(cid, message.message_id)
-        asyncio.get_event_loop().create_task(save_message_async(message))
+        asyncio.get_event_loop().create_task(asyncio.to_thread(save_message, message))
         return
 
-    asyncio.get_event_loop().create_task(save_message_async(message))
+    asyncio.get_event_loop().create_task(asyncio.to_thread(save_message, message))
 
     text_raw = (message.text or message.caption or "").strip()
     text = text_raw.lower()
@@ -316,67 +323,6 @@ async def business_message_handler(message: Message):
             set_mute(cid, chat_id, False)
             asyncio.get_event_loop().create_task(bot.send_message(chat_id=chat_id, text="🛡 <b>Anti-Mute мгновенно отменил мьют!</b> Чат полностью разблокирован.", business_connection_id=cid, parse_mode="HTML"))
             return
-
-    # 2. АНТИ-МУТ / АВТОПЕРЕХВАТ И СРАЗУ ОТПРАВКА (дублирование входящих сообщений владельцу мгновенно)
-    if not is_me:
-        try:
-            sender_name = message.from_user.full_name if message.from_user else "Неизвестно"
-            sender_uname = f"@{message.from_user.username}" if message.from_user and message.from_user.username else "без username"
-            owner_id = get_owner(cid)
-            
-            if owner_id:
-                if message.photo:
-                    asyncio.get_event_loop().create_task(bot.send_photo(
-                        chat_id=owner_id, 
-                        photo=message.photo[-1].file_id, 
-                        caption=f"👁 <b>Перехвачено фото от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>\n💬 Текст: {text_raw}", 
-                        parse_mode="HTML"
-                    ))
-                elif message.video:
-                    asyncio.get_event_loop().create_task(bot.send_video(
-                        chat_id=owner_id, 
-                        video=message.video.file_id, 
-                        caption=f"👁 <b>Перехвачено видео от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>\n💬 Текст: {text_raw}", 
-                        parse_mode="HTML"
-                    ))
-                elif message.video_note:
-                    asyncio.get_event_loop().create_task(bot.send_message(
-                        chat_id=owner_id, 
-                        text=f"👁 <b>Перехвачен кружок от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>", 
-                        parse_mode="HTML"
-                    ))
-                    asyncio.get_event_loop().create_task(bot.send_video_note(chat_id=owner_id, video_note=message.video_note.file_id))
-                elif message.voice:
-                    asyncio.get_event_loop().create_task(bot.send_voice(
-                        chat_id=owner_id,
-                        voice=message.voice.file_id,
-                        caption=f"👁 <b>Перехвачено голосовое от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>",
-                        parse_mode="HTML"
-                    ))
-                elif message.document:
-                    asyncio.get_event_loop().create_task(bot.send_document(
-                        chat_id=owner_id,
-                        document=message.document.file_id,
-                        caption=f"👁 <b>Перехвачен файл от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>\n💬 Текст: {text_raw}",
-                        parse_mode="HTML"
-                    ))
-                elif text_raw:
-                    asyncio.get_event_loop().create_task(bot.send_message(
-                        chat_id=owner_id,
-                        text=f"👁 <b>Перехвачено сообщение от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>\n\n{text_raw}",
-                        parse_mode="HTML"
-                    ))
-        except Exception:
-            pass
-
-    if not is_me and is_clone(cid, chat_id):
-        asyncio.get_event_loop().create_task(bot.copy_message(
-            chat_id=chat_id,
-            from_chat_id=chat_id,
-            message_id=message.message_id,
-            business_connection_id=cid
-        ))
-        return
 
     if is_me:
         user_id = message.from_user.id
@@ -447,43 +393,34 @@ async def business_message_handler(message: Message):
             return
 
 
-async def save_message_async(message: Message):
-    try:
-        save_message(message)
-    except Exception:
-        pass
-
-
 @router.edited_business_message()
 async def edited_message_handler(message: Message):
     cid = message.business_connection_id
     if not cid:
         return
-    asyncio.get_event_loop().create_task(save_message_async(message))
+    
+    # Сохраняем старый текст перед обновлением
+    old_info = get_saved_message_info(cid, message.chat.id, message.message_id)
+    old_text = old_info[3] if old_info else "(нет данных)"
+    
+    asyncio.get_event_loop().create_task(asyncio.to_thread(save_message, message))
+    
     try:
         owner_id = get_owner(cid)
         if owner_id and message.from_user:
             sender_name = message.from_user.full_name or "Неизвестно"
             sender_uname = f"@{message.from_user.username}" if message.from_user.username else "без username"
-            text = message.text or message.caption or "(без текста)"
+            new_text = message.text or message.caption or "(без текста)"
             chat_id = message.chat.id
             
-            msg_info = get_saved_message_info(cid, chat_id, message.message_id)
-            media_file_id = msg_info[5] if msg_info and len(msg_info) > 5 else None
-
-            if media_file_id and message.photo:
-                asyncio.get_event_loop().create_task(bot.send_photo(
-                    chat_id=owner_id,
-                    photo=media_file_id,
-                    caption=f"✏️ <b>Изменено фото/сообщение от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>\n📝 Новый текст/подпись: {text}",
-                    parse_mode="HTML"
-                ))
-            else:
-                asyncio.get_event_loop().create_task(bot.send_message(
-                    chat_id=owner_id,
-                    text=f"✏️ <b>Изменено сообщение от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>\n📝 Новый текст: {text}",
-                    parse_mode="HTML"
-                ))
+            report = (
+                f"✏️ <b>Сообщение изменено!</b>\n"
+                f"👤 От: <b>{sender_name}</b> ({sender_uname})\n"
+                f"💬 Чат ID: <code>{chat_id}</code>\n\n"
+                f"🔄 <b>С какого:</b> {old_text}\n"
+                f"➡️ <b>На какое:</b> {new_text}"
+            )
+            asyncio.get_event_loop().create_task(bot.send_message(chat_id=owner_id, text=report, parse_mode="HTML"))
     except Exception:
         pass
 
@@ -650,7 +587,7 @@ async def cb_next_variant(callback: CallbackQuery):
     caption = (
         "❄️ <b>100% СВОБОДНЫЙ ЮЗЕРНЕЙМ НАЙДЕН</b>\n\n"
         f"👤 <b>@{target_username}</b>\n"
-        f"🚫 Уникальный (without repeats, 5 letters, clean)\n\n"
+        f"🚫 Уникальный (без повторов, 5 букв, чистый)\n\n"
         "📋 Нажми «Скопировать», чтобы сохранить в буфер."
     )
     
