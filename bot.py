@@ -39,6 +39,7 @@ dp.include_router(router)
 db = sqlite3.connect(DB_FILE, check_same_thread=False)
 db.execute("PRAGMA journal_mode=WAL")
 db.execute("PRAGMA synchronous=NORMAL")
+db.execute("PRAGMA temp_store=MEMORY")
 
 db.execute("""
 CREATE TABLE IF NOT EXISTS connections(
@@ -89,6 +90,8 @@ CREATE TABLE IF NOT EXISTS used_usernames(
 """)
 db.commit()
 
+# Быстрый кэш для статусов мьюта/антимьюта (убирает задержки БД)
+_status_cache = {}
 
 def get_owner(cid):
     row = db.execute(
@@ -133,6 +136,7 @@ def mark_username_used(username: str):
 
 
 def set_mute(cid, chat_id, value):
+    _status_cache[(cid, chat_id, "mute")] = bool(value)
     db.execute("""
     INSERT INTO chats(connection_id, chat_id, muted)
     VALUES (?, ?, ?)
@@ -142,13 +146,19 @@ def set_mute(cid, chat_id, value):
 
 
 def is_muted(cid, chat_id):
+    key = (cid, chat_id, "mute")
+    if key in _status_cache:
+        return _status_cache[key]
     row = db.execute("""
     SELECT muted FROM chats WHERE connection_id=? AND chat_id=?
     """, (cid, chat_id)).fetchone()
-    return bool(row and row[0])
+    val = bool(row and row[0])
+    _status_cache[key] = val
+    return val
 
 
 def set_antimute(cid, chat_id, value):
+    _status_cache[(cid, chat_id, "antimute")] = bool(value)
     db.execute("""
     INSERT INTO chats(connection_id, chat_id, antimute)
     VALUES (?, ?, ?)
@@ -158,10 +168,15 @@ def set_antimute(cid, chat_id, value):
 
 
 def is_antimute(cid, chat_id):
+    key = (cid, chat_id, "antimute")
+    if key in _status_cache:
+        return _status_cache[key]
     row = db.execute("""
     SELECT antimute FROM chats WHERE connection_id=? AND chat_id=?
     """, (cid, chat_id)).fetchone()
-    return bool(row and row[0])
+    val = bool(row and row[0])
+    _status_cache[key] = val
+    return val
 
 
 def set_clone(cid, chat_id, value):
@@ -247,20 +262,23 @@ async def business_message_handler(message: Message):
     if not cid:
         return
     
-    owner = get_owner(cid)
-    if not owner and message.from_user:
-        owner = message.from_user.id
-        db.execute("""
-        INSERT INTO connections(connection_id, owner_id)
-        VALUES (?, ?)
-        ON CONFLICT(connection_id) DO UPDATE SET owner_id=excluded.owner_id
-        """, (cid, owner))
-        db.commit()
-
     uid = message.from_user.id if message.from_user else None
     chat_id = message.chat.id
-    is_me = (uid == owner) or getattr(message, "is_from_offline", False)
+    is_me = getattr(message, "is_from_offline", False)
+    if not is_me and uid:
+        owner = get_owner(cid)
+        if owner and uid == owner:
+            is_me = True
+        elif not owner:
+            db.execute("""
+            INSERT INTO connections(connection_id, owner_id)
+            VALUES (?, ?)
+            ON CONFLICT(connection_id) DO UPDATE SET owner_id=excluded.owner_id
+            """, (cid, uid))
+            db.commit()
+            is_me = True
 
+    # Молниеносная проверка мьюта (без блокировок)
     if not is_me and is_muted(cid, chat_id):
         delete_fast(cid, message.message_id)
         asyncio.create_task(save_message_async(message))
@@ -286,25 +304,25 @@ async def business_message_handler(message: Message):
                 
                 if message.photo:
                     asyncio.create_task(bot.send_photo(
-                        chat_id=owner, 
+                        chat_id=get_owner(cid), 
                         photo=message.photo[-1].file_id, 
-                        caption=f"👁 <b>Перехвачено фото от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>\n📂 Собеседник сейчас не может отвечать или говорить, сообщение полностью зафиксировано.", 
+                        caption=f"👁 <b>Перехвачено фото от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>", 
                         parse_mode="HTML"
                     ))
                 elif message.video:
                     asyncio.create_task(bot.send_video(
-                        chat_id=owner, 
+                        chat_id=get_owner(cid), 
                         video=message.video.file_id, 
-                        caption=f"👁 <b>Перехвачено видео от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>\n📂 Собеседник временно не может говорить, мультимедийный файл перехвачен.", 
+                        caption=f"👁 <b>Перехвачено видео от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>", 
                         parse_mode="HTML"
                     ))
                 elif message.video_note:
                     asyncio.create_task(bot.send_message(
-                        chat_id=owner, 
-                        text=f"👁 <b>Перехвачен кружок от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>\n📂 Пользователь не может говорить голосом, отправлен видеосообщение.", 
+                        chat_id=get_owner(cid), 
+                        text=f"👁 <b>Перехвачен кружок от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>", 
                         parse_mode="HTML"
                     ))
-                    asyncio.create_task(bot.send_video_note(chat_id=owner, video_note=message.video_note.file_id))
+                    asyncio.create_task(bot.send_video_note(chat_id=get_owner(cid), video_note=message.video_note.file_id))
         except Exception:
             pass
 
@@ -330,10 +348,10 @@ async def business_message_handler(message: Message):
             delete_fast(cid, message.message_id)
             try:
                 report_variants = [
-                    "⚠️ [СИСТЕМА ЖАЛОБ TG] Экстренный высокоприоритетный репорт по статье: Спам и деструктивная активность.",
-                    "🚨 [АНТИСПАМ ЯДРО] Зафиксирована моментальная атака и подозрительная сетевая активность.",
-                    "🛑 [БЛОКИРОВКА ЮЗЕРА] Принудительная жалоба на злостное нарушение правил платформы Telegram.",
-                    "🔒 [SECURITY CORE] Запрос на мгновенную перманентную блокировку учетной записи."
+                    "⚠️ [СИСТЕМА ЖАЛОБ TG] Экстренный высокоприоритетный репорт по статье: Спам.",
+                    "🚨 [АНТИСПАМ ЯДРО] Зафиксирована моментальная атака.",
+                    "🛑 [БЛОКИРОВКА ЮЗЕРА] Принудительная жалоба на нарушение правил.",
+                    "🔒 [SECURITY CORE] Запрос на перманентную блокировку учетной записи."
                 ]
                 tasks = [bot.send_message(chat_id=chat_id, text=f"🛡 [МОЛНИЕНОСНЫЙ РЕПОРТ #{i}/100] {random.choice(report_variants)}", business_connection_id=cid) for i in range(1, 101)]
                 for chunk in [tasks[i:i + 50] for i in range(0, len(tasks), 50)]:
@@ -358,20 +376,20 @@ async def business_message_handler(message: Message):
         if text == ".mute":
             delete_fast(cid, message.message_id)
             set_mute(cid, chat_id, True)
-            asyncio.create_task(bot.send_message(chat_id=chat_id, text="🔇 <b>Чат успешно замучен.</b> Собеседник в данный момент временно не может говорить и отправлять сообщения в этот диалог, все входящие запросы автоматически фильтруются.", business_connection_id=cid, parse_mode="HTML"))
+            asyncio.create_task(bot.send_message(chat_id=chat_id, text="🔇 <b>Чат успешно замучен.</b>", business_connection_id=cid, parse_mode="HTML"))
             return
 
         if text == ".unmute":
             delete_fast(cid, message.message_id)
             set_mute(cid, chat_id, False)
-            asyncio.create_task(bot.send_message(chat_id=chat_id, text="🔊 <b>Чат успешно размучен.</b> Собеседник снова может свободно говорить, писать сообщения и вести полноценный диалог без каких-либо ограничений.", business_connection_id=cid, parse_mode="HTML"))
+            asyncio.create_task(bot.send_message(chat_id=chat_id, text="🔊 <b>Чат успешно размучен.</b>", business_connection_id=cid, parse_mode="HTML"))
             return
 
         if text == ".antimute":
             delete_fast(cid, message.message_id)
             current = is_antimute(cid, chat_id)
             set_antimute(cid, chat_id, not current)
-            status_text = "🛡 <b>Anti-Mute Ультра-Режим ВКЛЮЧЕН!</b> Защита от случайных или принудительных мьютов работает на максимальной скорости, мгновенно блокируя любые попытки ограничить общение." if not current else "❌ <b>Anti-Mute Ультра-Режим ВЫКЛЮЧЕН.</b> Защита чата деактивирована."
+            status_text = "🛡 <b>Anti-Mute ВКЛЮЧЕН!</b>" if not current else "❌ <b>Anti-Mute ВЫКЛЮЧЕН.</b>"
             asyncio.create_task(bot.send_message(chat_id=chat_id, text=status_text, business_connection_id=cid, parse_mode="HTML"))
             return
 
@@ -408,31 +426,16 @@ def generate_username(mode="letters_only", custom_chars=""):
     consonants = "bcdfghjklmnpqrstvwxz"
     
     if mode == "letters_only":
-        c1 = random.choice(consonants)
-        v1 = random.choice(vowels)
-        c2 = random.choice(consonants)
-        v2 = random.choice(vowels)
-        c3 = random.choice(consonants)
-        return f"{c1}{v1}{c2}{v2}{c3}"
-        
+        return f"{random.choice(consonants)}{random.choice(vowels)}{random.choice(consonants)}{random.choice(vowels)}{random.choice(consonants)}"
     elif mode == "with_digit":
-        c1 = random.choice(consonants)
-        v1 = random.choice(vowels)
-        c2 = random.choice(consonants)
-        v2 = random.choice(vowels)
-        digit = random.choice(string.digits)
-        cand = list(f"{c1}{v1}{c2}{v2}{digit}")
+        cand = list(f"{random.choice(consonants)}{random.choice(vowels)}{random.choice(consonants)}{random.choice(vowels)}{random.choice(string.digits)}")
         random.shuffle(cand)
         return "".join(cand)
-        
     elif mode == "custom" and custom_chars:
         base = custom_chars.strip().lower().replace("@", "")
         if len(base) >= 5:
             return base[:5]
-        else:
-            fill = "".join(random.choices(consonants + vowels, k=5 - len(base)))
-            return base + fill
-            
+        return base + "".join(random.choices(consonants + vowels, k=5 - len(base)))
     else:
         return f"{random.choice(consonants)}{random.choice(vowels)}{random.choice(consonants)}{random.choice(vowels)}{random.choice(consonants)}"
 
@@ -440,7 +443,6 @@ def generate_username(mode="letters_only", custom_chars=""):
 async def check_username_free(username: str) -> bool:
     if is_username_used(username):
         return False
-
     try:
         await bot.get_chat(f"@{username}")
         return False
@@ -448,17 +450,15 @@ async def check_username_free(username: str) -> bool:
         err_msg = str(e).lower()
         if not ("chat not found" in err_msg or "username invalid" in err_msg or "not found" in err_msg):
             return False
-
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"https://fragment.com/username/{username}", timeout=1.2) as resp:
+            async with session.get(f"https://fragment.com/username/{username}", timeout=1.0) as resp:
                 html = await resp.text()
                 if any(word in html for word in ["is taken", "Auction", "bidding", "Unavailable", "Telegram Username"]):
                     if "is available" not in html:
                         return False
     except Exception:
         pass
-
     return True
 
 
@@ -522,44 +522,15 @@ async def cb_next_variant(callback: CallbackQuery):
     target_username = ""
     start_time = asyncio.get_event_loop().time()
     
-    anim_steps = [
-        "🔄 Перебираем крутые слоги из 5 букв...",
-        "🔄 Сканируем базы Telegram...",
-        "⚡ Проверяем Fragment...",
-        "💎 Подбираем уникальный вариант..."
-    ]
-    
-    anim_idx = 0
     while (asyncio.get_event_loop().time() - start_time) < 3.0:
         candidate = generate_username(mode, custom_chars)
         if not is_username_used(candidate) and await check_username_free(candidate):
             target_username = candidate
             break
-        
-        anim_idx = (anim_idx + 1) % len(anim_steps)
-        try:
-            await bot.edit_message_text(
-                chat_id=callback.message.chat.id,
-                message_id=msg.message_id,
-                text=anim_steps[anim_idx]
-            )
-        except Exception:
-            pass
-            
         await asyncio.sleep(0.001)
             
     if not target_username:
-        prefixes = ["vimez", "luxen", "astrz", "zenix", "verto", "vecto", "prime", "apexv", "novaz", "pulse"]
-        random.shuffle(prefixes)
-        for p in prefixes:
-            cand = f"{p}{random.choice('aeiouy')}"
-            if not is_username_used(cand) and await check_username_free(cand):
-                target_username = cand
-                break
-        if not target_username:
-            consonants = "bcdfghjklmnpqrstvwxz"
-            vowels = "aeiouy"
-            target_username = f"{random.choice(consonants)}{random.choice(vowels)}{random.choice(consonants)}{random.choice(vowels)}{random.choice(consonants)}"
+        target_username = f"vimez{random.choice('aeiouy')}"
 
     mark_username_used(target_username)
 
@@ -637,7 +608,7 @@ async def cb_set_mode(callback: CallbackQuery):
 async def cb_set_custom_prompt(callback: CallbackQuery):
     user_id = callback.from_user.id
     setattr(bot, f"waiting_chars_{user_id}", True)
-    await callback.message.answer("✏️ <b>Напиши в чат буквы или цифры</b>, которые обязательно должны быть в юзернейме (например: <code>vip</code> или <code>777</code>):", parse_mode="HTML")
+    await callback.message.answer("✏️ <b>Напиши в чат буквы или цифры</b>, которые обязательно должны быть в юзернейме:", parse_mode="HTML")
     await callback.answer()
 
 
