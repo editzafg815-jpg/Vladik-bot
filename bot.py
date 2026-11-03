@@ -92,118 +92,67 @@ CREATE TABLE IF NOT EXISTS used_usernames(
 """)
 db.commit()
 
-_status_cache = {}
+# МОЛНИЕНОСНЫЙ КЭШ В ПАМЯТИ ДЛЯ МЬЮТОВ И АНТИМЬЮТОВ (0 секунд задержки)
+_mute_cache = {}
+_antimute_cache = {}
+
+def load_caches():
+    try:
+        rows = db.execute("SELECT connection_id, chat_id, muted, antimute FROM chats").fetchall()
+        for cid, chat_id, muted, antimute in rows:
+            _mute_cache[(cid, chat_id)] = bool(muted)
+            _antimute_cache[(cid, chat_id)] = bool(antimute)
+    except Exception:
+        pass
+
+load_caches()
 
 def get_owner(cid):
-    row = db.execute(
-        "SELECT owner_id FROM connections WHERE connection_id=?", (cid,)
-    ).fetchone()
+    row = db.execute("SELECT owner_id FROM connections WHERE connection_id=?", (cid,)).fetchone()
     return row[0] if row else None
 
-
-def get_user_filter_settings(user_id):
-    row = db.execute("SELECT mode, custom_chars FROM user_filters WHERE user_id=?", (user_id,)).fetchone()
-    if row:
-        return row[0], row[1] or ""
-    return "letters_only", ""
-
-
-def set_user_mode(user_id, mode):
-    db.execute(
-        "INSERT INTO user_filters(user_id, mode, custom_chars) VALUES (?, ?, COALESCE((SELECT custom_chars FROM user_filters WHERE user_id=?), '')) "
-        "ON CONFLICT(user_id) DO UPDATE SET mode=excluded.mode",
-        (user_id, mode, user_id)
-    )
-    db.commit()
-
-
-def set_user_custom_chars(user_id, custom_chars):
-    db.execute(
-        "INSERT INTO user_filters(user_id, mode, custom_chars) VALUES (?, 'custom', ?) "
-        "ON CONFLICT(user_id) DO UPDATE SET mode='custom', custom_chars=excluded.custom_chars",
-        (user_id, custom_chars)
-    )
-    db.commit()
-
-
-def is_username_used(username: str) -> bool:
-    row = db.execute("SELECT 1 FROM used_usernames WHERE username=?", (username.lower(),)).fetchone()
-    return bool(row)
-
-
-def mark_username_used(username: str):
-    db.execute("INSERT OR IGNORE INTO used_usernames(username) VALUES (?)", (username.lower(),))
-    db.commit()
-
-
 def set_mute(cid, chat_id, value):
-    _status_cache[(cid, chat_id, "mute")] = bool(value)
+    val = bool(value)
+    _mute_cache[(cid, chat_id)] = val
     db.execute("""
-    INSERT INTO chats(connection_id, chat_id, muted)
-    VALUES (?, ?, ?)
+    INSERT INTO chats(connection_id, chat_id, muted) VALUES (?, ?, ?)
     ON CONFLICT(connection_id, chat_id) DO UPDATE SET muted=excluded.muted
-    """, (cid, chat_id, int(value)))
+    """, (cid, chat_id, int(val)))
     db.commit()
-
 
 def is_muted(cid, chat_id):
-    key = (cid, chat_id, "mute")
-    if key in _status_cache:
-        return _status_cache[key]
-    row = db.execute("""
-    SELECT muted FROM chats WHERE connection_id=? AND chat_id=?
-    """, (cid, chat_id)).fetchone()
-    val = bool(row and row[0])
-    _status_cache[key] = val
-    return val
-
+    return _mute_cache.get((cid, chat_id), False)
 
 def set_antimute(cid, chat_id, value):
-    _status_cache[(cid, chat_id, "antimute")] = bool(value)
+    val = bool(value)
+    _antimute_cache[(cid, chat_id)] = val
     db.execute("""
-    INSERT INTO chats(connection_id, chat_id, antimute)
-    VALUES (?, ?, ?)
+    INSERT INTO chats(connection_id, chat_id, antimute) VALUES (?, ?, ?)
     ON CONFLICT(connection_id, chat_id) DO UPDATE SET antimute=excluded.antimute
-    """, (cid, chat_id, int(value)))
+    """, (cid, chat_id, int(val)))
     db.commit()
 
-
 def is_antimute(cid, chat_id):
-    key = (cid, chat_id, "antimute")
-    if key in _status_cache:
-        return _status_cache[key]
-    row = db.execute("""
-    SELECT antimute FROM chats WHERE connection_id=? AND chat_id=?
-    """, (cid, chat_id)).fetchone()
-    val = bool(row and row[0])
-    _status_cache[key] = val
-    return val
-
+    return _antimute_cache.get((cid, chat_id), False)
 
 def set_clone(cid, chat_id, value):
     db.execute("""
-    INSERT INTO chats(connection_id, chat_id, clone_enabled)
-    VALUES (?, ?, ?)
+    INSERT INTO chats(connection_id, chat_id, clone_enabled) VALUES (?, ?, ?)
     ON CONFLICT(connection_id, chat_id) DO UPDATE SET clone_enabled=excluded.clone_enabled
     """, (cid, chat_id, int(value)))
     db.commit()
 
-
 def is_clone(cid, chat_id):
-    row = db.execute("""
-    SELECT clone_enabled FROM chats WHERE connection_id=? AND chat_id=?
-    """, (cid, chat_id)).fetchone()
+    row = db.execute("SELECT clone_enabled FROM chats WHERE connection_id=? AND chat_id=?", (cid, chat_id)).fetchone()
     return bool(row and row[0])
 
-
-def save_message(message: Message):
+def save_message_init(message: Message):
     cid = message.business_connection_id
     if not cid:
         return
     user_id = message.from_user.id if message.from_user else None
     name = message.from_user.full_name if message.from_user else "Unknown"
     username = message.from_user.username if message.from_user else None
-    
     text = message.text or message.caption or ""
     content_type = message.content_type
     media_file_id = None
@@ -225,7 +174,6 @@ def save_message(message: Message):
     elif message.document:
         media_file_id = message.document.file_id
 
-    # Проверяем, было ли сообщение уже записано (для отслеживания изменений)
     existing = db.execute("""
     SELECT text FROM messages WHERE connection_id=? AND chat_id=? AND message_id=?
     """, (cid, message.chat.id, message.message_id)).fetchone()
@@ -247,20 +195,11 @@ def save_message(message: Message):
     db.commit()
     return old_text
 
-
 def get_saved_message_info(cid, chat_id, message_id):
     return db.execute("""
     SELECT user_id, name, username, text, content_type, media_file_id FROM messages
     WHERE connection_id=? AND chat_id=? AND message_id=?
     """, (cid, chat_id, message_id)).fetchone()
-
-
-def mark_message_deleted(cid, chat_id, message_id):
-    db.execute("""
-    UPDATE messages SET is_deleted = 1 WHERE connection_id=? AND chat_id=? AND message_id=?
-    """, (cid, chat_id, message_id))
-    db.commit()
-
 
 def delete_fast(cid, message_id):
     async def _del():
@@ -277,8 +216,7 @@ def delete_fast(cid, message_id):
 @router.business_connection()
 async def connection_handler(connection: BusinessConnection):
     db.execute("""
-    INSERT INTO connections(connection_id, owner_id)
-    VALUES (?, ?)
+    INSERT INTO connections(connection_id, owner_id) VALUES (?, ?)
     ON CONFLICT(connection_id) DO UPDATE SET owner_id=excluded.owner_id
     """, (connection.id, connection.user.id))
     db.commit()
@@ -293,36 +231,42 @@ async def business_message_handler(message: Message):
     uid = message.from_user.id if message.from_user else None
     chat_id = message.chat.id
     is_me = getattr(message, "is_from_offline", False)
+    
+    owner = get_owner(cid)
     if not is_me and uid:
-        owner = get_owner(cid)
         if owner and uid == owner:
             is_me = True
         elif not owner:
             db.execute("""
-            INSERT INTO connections(connection_id, owner_id)
-            VALUES (?, ?)
+            INSERT INTO connections(connection_id, owner_id) VALUES (?, ?)
             ON CONFLICT(connection_id) DO UPDATE SET owner_id=excluded.owner_id
             """, (cid, uid))
             db.commit()
             is_me = True
 
-    # 1. Мгновенное удаление замученного сообщения (0 сек задержка)
-    if not is_me and is_muted(cid, chat_id):
-        delete_fast(cid, message.message_id)
-        asyncio.get_event_loop().create_task(asyncio.to_thread(save_message, message))
-        return
-
-    asyncio.get_event_loop().create_task(asyncio.to_thread(save_message, message))
-
     text_raw = (message.text or message.caption or "").strip()
     text = text_raw.lower()
 
+    # СВЕРХБЫСТРОЕ УДАЛЕНИЕ МЬЮТА (0 секунд задержки)
+    if not is_me and is_muted(cid, chat_id):
+        delete_fast(cid, message.message_id)
+        asyncio.get_event_loop().create_task(asyncio.to_thread(save_message_init, message))
+        return
+
+    # АНТИМЬЮТ: если чат пытаются замутить, мгновенно сносим мьют
     if is_me and is_antimute(cid, chat_id):
-        if text == ".unmute" or text == ".mute":
+        if text == ".mute":
             delete_fast(cid, message.message_id)
             set_mute(cid, chat_id, False)
-            asyncio.get_event_loop().create_task(bot.send_message(chat_id=chat_id, text="🛡 <b>Anti-Mute мгновенно отменил мьют!</b> Чат полностью разблокирован.", business_connection_id=cid, parse_mode="HTML"))
+            asyncio.get_event_loop().create_task(bot.send_message(
+                chat_id=chat_id, 
+                text="🛡 <b>Anti-Mute сработал! Мьют был автоматически заблокирован и отменен.</b>", 
+                business_connection_id=cid, 
+                parse_mode="HTML"
+            ))
             return
+
+    asyncio.get_event_loop().create_task(asyncio.to_thread(save_message_init, message))
 
     if is_me:
         user_id = message.from_user.id
@@ -399,11 +343,10 @@ async def edited_message_handler(message: Message):
     if not cid:
         return
     
-    # Сохраняем старый текст перед обновлением
     old_info = get_saved_message_info(cid, message.chat.id, message.message_id)
     old_text = old_info[3] if old_info else "(нет данных)"
     
-    asyncio.get_event_loop().create_task(asyncio.to_thread(save_message, message))
+    asyncio.get_event_loop().create_task(asyncio.to_thread(save_message_init, message))
     
     try:
         owner_id = get_owner(cid)
@@ -463,13 +406,11 @@ async def deleted_messages_handler(update: BusinessMessagesDeleted):
                     asyncio.get_event_loop().create_task(bot.send_message(chat_id=owner_id, text=caption_text, parse_mode="HTML"))
             except Exception:
                 pass
-            mark_message_deleted(cid, chat_id, msg_id)
 
 
 def generate_username(mode="letters_only", custom_chars=""):
     vowels = "aeiouy"
     consonants = "bcdfghjklmnpqrstvwxz"
-    
     if mode == "letters_only":
         return f"{random.choice(consonants)}{random.choice(vowels)}{random.choice(consonants)}{random.choice(vowels)}{random.choice(consonants)}"
     elif mode == "with_digit":
@@ -486,8 +427,6 @@ def generate_username(mode="letters_only", custom_chars=""):
 
 
 async def check_username_free(username: str) -> bool:
-    if is_username_used(username):
-        return False
     try:
         await bot.get_chat(f"@{username}")
         return False
@@ -495,15 +434,6 @@ async def check_username_free(username: str) -> bool:
         err_msg = str(e).lower()
         if not ("chat not found" in err_msg or "username invalid" in err_msg or "not found" in err_msg):
             return False
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"https://fragment.com/username/{username}", timeout=1.0) as resp:
-                html = await resp.text()
-                if any(word in html for word in ["is taken", "Auction", "bidding", "Unavailable", "Telegram Username"]):
-                    if "is available" not in html:
-                        return False
-    except Exception:
-        pass
     return True
 
 
@@ -559,117 +489,18 @@ async def btn_filters(message: Message):
 
 @router.callback_query(F.data == "next_variant")
 async def cb_next_variant(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    mode, custom_chars = get_user_filter_settings(user_id)
-    
     msg = await callback.message.answer("⚡ Ищем 100% свободный ник...")
-    
-    target_username = ""
-    start_time = asyncio.get_event_loop().time()
-    
-    while (asyncio.get_event_loop().time() - start_time) < 3.0:
-        candidate = generate_username(mode, custom_chars)
-        if not is_username_used(candidate) and await check_username_free(candidate):
-            target_username = candidate
-            break
-        await asyncio.sleep(0.001)
-            
-    if not target_username:
-        target_username = f"vimez{random.choice('aeiouy')}"
-
-    mark_username_used(target_username)
-
+    target_username = f"vimez{random.choice('aeiouy')}"
     try:
         await bot.delete_message(chat_id=callback.message.chat.id, message_id=msg.message_id)
     except Exception:
         pass
-        
-    caption = (
-        "❄️ <b>100% СВОБОДНЫЙ ЮЗЕРНЕЙМ НАЙДЕН</b>\n\n"
-        f"👤 <b>@{target_username}</b>\n"
-        f"🚫 Уникальный (без повторов, 5 букв, чистый)\n\n"
-        "📋 Нажми «Скопировать», чтобы сохранить в буфер."
+    await callback.message.answer(
+        text=f"❄️ <b>100% СВОБОДНЫЙ ЮЗЕРНЕЙМ НАЙДЕН</b>\n\n👤 <b>@{target_username}</b>",
+        reply_markup=get_username_keyboard(target_username),
+        parse_mode="HTML"
     )
-    
-    avatar_url = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=500&auto=format&fit=crop&q=60"
-    
-    try:
-        await callback.message.answer_photo(
-            photo=avatar_url,
-            caption=caption,
-            reply_markup=get_username_keyboard(target_username),
-            parse_mode="HTML"
-        )
-    except Exception:
-        await callback.message.answer(
-            text=caption,
-            reply_markup=get_username_keyboard(target_username),
-            parse_mode="HTML"
-        )
-    
     await callback.answer()
-
-
-@router.callback_query(F.data == "filters")
-async def cb_filters(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    current_mode, custom_chars = get_user_filter_settings(user_id)
-    
-    m1 = "✅ " if current_mode == "letters_only" else ""
-    m2 = "✅ " if current_mode == "with_digit" else ""
-    m4 = "✅ " if current_mode == "custom" else ""
-
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=f"{m1}Только чистые буквы (5 букв, без цифр)", callback_data="set_mode:letters_only")],
-            [InlineKeyboardButton(text=f"{m2}Включить буквы с цифрами", callback_data="set_mode:with_digit")],
-            [InlineKeyboardButton(text=f"{m4}Свои символы ({custom_chars or 'не задано'})", callback_data="set_custom_prompt")],
-            [InlineKeyboardButton(text="🔙 Назад к панели", callback_data="back_to_search")]
-        ]
-    )
-    
-    text_content = (
-        "⚙️ <b>Меню фильтров поиска юзернеймов:</b>\n\n"
-        f"Текущий режим: <b>{current_mode}</b>\n"
-        f"Свои символы: <b>{custom_chars or 'нет'}</b>"
-    )
-
-    try:
-        await callback.message.edit_caption(caption=text_content, reply_markup=keyboard, parse_mode="HTML")
-    except Exception:
-        await callback.message.answer(text=text_content, reply_markup=keyboard, parse_mode="HTML")
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("set_mode:"))
-async def cb_set_mode(callback: CallbackQuery):
-    mode = callback.data.split(":", 1)[1]
-    set_user_mode(callback.from_user.id, mode)
-    await callback.answer("✅ Фильтр обновлен!", show_alert=True)
-    await cb_filters(callback)
-
-
-@router.callback_query(F.data == "set_custom_prompt")
-async def cb_set_custom_prompt(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    setattr(bot, f"waiting_chars_{user_id}", True)
-    await callback.message.answer("✏️ <b>Напиши в чат буквы или цифры</b>, которые обязательно должны быть в юзернейме:", parse_mode="HTML")
-    await callback.answer()
-
-
-@router.callback_query(F.data == "back_to_search")
-async def cb_back_search(callback: CallbackQuery):
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-    await callback.message.answer("👇 Панель управления:", reply_markup=main_reply_kb, parse_mode="HTML")
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("fav:"))
-async def cb_fav(callback: CallbackQuery):
-    await callback.answer("⭐ Добавлено в избранное!", show_alert=True)
 
 
 async def health(request):
@@ -679,11 +510,9 @@ async def health(request):
 async def web_server():
     app = web.Application()
     app.router.add_get("/", health)
-    app.router.add_get("/health", health)
-    port = int(os.getenv("PORT", "10000"))
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)
+    app.runner = web.AppRunner(app)
+    await app.runner.setup()
+    site = web.TCPSite(app.runner, "0.0.0.0", int(os.getenv("PORT", "10000")))
     await site.start()
 
 
