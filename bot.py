@@ -27,7 +27,7 @@ if not BOT_TOKEN:
 DB_FILE = "business_bot.db"
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
