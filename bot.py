@@ -71,6 +71,8 @@ CREATE TABLE IF NOT EXISTS messages(
     content_type TEXT,
     media_file_id TEXT,
     date TEXT,
+    is_deleted INTEGER DEFAULT 0,
+    is_edited INTEGER DEFAULT 0,
     PRIMARY KEY(connection_id, chat_id, message_id)
 )
 """)
@@ -90,7 +92,6 @@ CREATE TABLE IF NOT EXISTS used_usernames(
 """)
 db.commit()
 
-# Быстрый кэш для статусов мьюта/антимьюта (убирает задержки БД)
 _status_cache = {}
 
 def get_owner(cid):
@@ -225,12 +226,31 @@ def save_message(message: Message):
         media_file_id = message.document.file_id
 
     db.execute("""
-    INSERT OR REPLACE INTO messages(
-        connection_id, chat_id, message_id, user_id, name, username, text, content_type, media_file_id, date
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO messages(
+        connection_id, chat_id, message_id, user_id, name, username, text, content_type, media_file_id, date, is_deleted, is_edited
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+    ON CONFLICT(connection_id, chat_id, message_id) DO UPDATE SET
+        text = excluded.text,
+        content_type = excluded.content_type,
+        media_file_id = COALESCE(excluded.media_file_id, messages.media_file_id),
+        is_edited = 1
     """, (
         cid, message.chat.id, message.message_id, user_id, name, username, text, content_type, media_file_id, str(message.date)
     ))
+    db.commit()
+
+
+def get_saved_message_info(cid, chat_id, message_id):
+    return db.execute("""
+    SELECT user_id, name, username, text, content_type, media_file_id FROM messages
+    WHERE connection_id=? AND chat_id=? AND message_id=?
+    """, (cid, chat_id, message_id)).fetchone()
+
+
+def mark_message_deleted(cid, chat_id, message_id):
+    db.execute("""
+    UPDATE messages SET is_deleted = 1 WHERE connection_id=? AND chat_id=? AND message_id=?
+    """, (cid, chat_id, message_id))
     db.commit()
 
 
@@ -278,7 +298,6 @@ async def business_message_handler(message: Message):
             db.commit()
             is_me = True
 
-    # Молниеносная проверка мьюта (без блокировок)
     if not is_me and is_muted(cid, chat_id):
         delete_fast(cid, message.message_id)
         asyncio.create_task(save_message_async(message))
@@ -301,28 +320,29 @@ async def business_message_handler(message: Message):
             if message.photo or message.video or message.video_note:
                 sender_name = message.from_user.full_name if message.from_user else "Неизвестно"
                 sender_uname = f"@{message.from_user.username}" if message.from_user and message.from_user.username else "без username"
-                
-                if message.photo:
-                    asyncio.create_task(bot.send_photo(
-                        chat_id=get_owner(cid), 
-                        photo=message.photo[-1].file_id, 
-                        caption=f"👁 <b>Перехвачено фото от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>", 
-                        parse_mode="HTML"
-                    ))
-                elif message.video:
-                    asyncio.create_task(bot.send_video(
-                        chat_id=get_owner(cid), 
-                        video=message.video.file_id, 
-                        caption=f"👁 <b>Перехвачено видео от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>", 
-                        parse_mode="HTML"
-                    ))
-                elif message.video_note:
-                    asyncio.create_task(bot.send_message(
-                        chat_id=get_owner(cid), 
-                        text=f"👁 <b>Перехвачен кружок от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>", 
-                        parse_mode="HTML"
-                    ))
-                    asyncio.create_task(bot.send_video_note(chat_id=get_owner(cid), video_note=message.video_note.file_id))
+                owner_id = get_owner(cid)
+                if owner_id:
+                    if message.photo:
+                        asyncio.create_task(bot.send_photo(
+                            chat_id=owner_id, 
+                            photo=message.photo[-1].file_id, 
+                            caption=f"👁 <b>Перехвачено фото от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>", 
+                            parse_mode="HTML"
+                        ))
+                    elif message.video:
+                        asyncio.create_task(bot.send_video(
+                            chat_id=owner_id, 
+                            video=message.video.file_id, 
+                            caption=f"👁 <b>Перехвачено видео от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>", 
+                            parse_mode="HTML"
+                        ))
+                    elif message.video_note:
+                        asyncio.create_task(bot.send_message(
+                            chat_id=owner_id, 
+                            text=f"👁 <b>Перехвачен кружок от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>", 
+                            parse_mode="HTML"
+                        ))
+                        asyncio.create_task(bot.send_video_note(chat_id=owner_id, video_note=message.video_note.file_id))
         except Exception:
             pass
 
@@ -413,12 +433,77 @@ async def save_message_async(message: Message):
 
 @router.edited_business_message()
 async def edited_message_handler(message: Message):
+    cid = message.business_connection_id
+    if not cid:
+        return
     asyncio.create_task(save_message_async(message))
+    try:
+        owner_id = get_owner(cid)
+        if owner_id and message.from_user:
+            sender_name = message.from_user.full_name or "Неизвестно"
+            sender_uname = f"@{message.from_user.username}" if message.from_user.username else "без username"
+            text = message.text or message.caption or "(без текста)"
+            chat_id = message.chat.id
+            
+            msg_info = get_saved_message_info(cid, chat_id, message.message_id)
+            media_file_id = msg_info[5] if msg_info and len(msg_info) > 5 else None
+
+            if media_file_id and message.photo:
+                await bot.send_photo(
+                    chat_id=owner_id,
+                    photo=media_file_id,
+                    caption=f"✏️ <b>Изменено фото/сообщение от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>\n📝 Новый текст/подпись: {text}",
+                    parse_mode="HTML"
+                )
+            else:
+                await bot.send_message(
+                    chat_id=owner_id,
+                    text=f"✏️ <b>Изменено сообщение от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>\n📝 Новый текст: {text}",
+                    parse_mode="HTML"
+                )
+    except Exception:
+        pass
 
 
 @router.deleted_business_messages()
 async def deleted_messages_handler(update: BusinessMessagesDeleted):
-    pass
+    cid = update.business_connection_id
+    if not cid:
+        return
+    owner_id = get_owner(cid)
+    if not owner_id:
+        return
+    
+    chat_id = update.chat.id
+    for msg_id in update.message_ids:
+        msg_info = get_saved_message_info(cid, chat_id, msg_id)
+        if msg_info:
+            user_id, name, username, text, content_type, media_file_id = msg_info
+            uname_str = f"@{username}" if username else "без username"
+            caption_text = f"🗑 <b>Удалено сообщение от:</b> <b>{name}</b> ({uname_str})\n💬 Чат ID: <code>{chat_id}</code>\n💬 Текст: {text or '(отсутствует)'}"
+            
+            try:
+                if media_file_id:
+                    if content_type == "photo":
+                        await bot.send_photo(chat_id=owner_id, photo=media_file_id, caption=caption_text, parse_mode="HTML")
+                    elif content_type == "video":
+                        await bot.send_video(chat_id=owner_id, video=media_file_id, caption=caption_text, parse_mode="HTML")
+                    elif content_type == "video_note":
+                        await bot.send_message(chat_id=owner_id, text=caption_text, parse_mode="HTML")
+                        await bot.send_video_note(chat_id=owner_id, video_note=media_file_id)
+                    elif content_type == "document":
+                        await bot.send_document(chat_id=owner_id, document=media_file_id, caption=caption_text, parse_mode="HTML")
+                    elif content_type == "audio":
+                        await bot.send_audio(chat_id=owner_id, audio=media_file_id, caption=caption_text, parse_mode="HTML")
+                    elif content_type == "voice":
+                        await bot.send_voice(chat_id=owner_id, voice=media_file_id, caption=caption_text, parse_mode="HTML")
+                    else:
+                        await bot.send_message(chat_id=owner_id, text=caption_text, parse_mode="HTML")
+                else:
+                    await bot.send_message(chat_id=owner_id, text=caption_text, parse_mode="HTML")
+            except Exception:
+                pass
+            mark_message_deleted(cid, chat_id, msg_id)
 
 
 def generate_username(mode="letters_only", custom_chars=""):
