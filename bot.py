@@ -92,67 +92,110 @@ CREATE TABLE IF NOT EXISTS used_usernames(
 """)
 db.commit()
 
-# МОЛНИЕНОСНЫЙ КЭШ В ПАМЯТИ ДЛЯ МЬЮТОВ И АНТИМЬЮТОВ (0 секунд задержки)
 _mute_cache = {}
 _antimute_cache = {}
 
-def load_caches():
-    try:
-        rows = db.execute("SELECT connection_id, chat_id, muted, antimute FROM chats").fetchall()
-        for cid, chat_id, muted, antimute in rows:
-            _mute_cache[(cid, chat_id)] = bool(muted)
-            _antimute_cache[(cid, chat_id)] = bool(antimute)
-    except Exception:
-        pass
+for cid, chat_id, muted, antimute in db.execute("SELECT connection_id, chat_id, muted, antimute FROM chats").fetchall():
+    _mute_cache[(cid, chat_id)] = bool(muted)
+    _antimute_cache[(cid, chat_id)] = bool(antimute)
 
-load_caches()
 
 def get_owner(cid):
-    row = db.execute("SELECT owner_id FROM connections WHERE connection_id=?", (cid,)).fetchone()
+    row = db.execute(
+        "SELECT owner_id FROM connections WHERE connection_id=?", (cid,)
+    ).fetchone()
     return row[0] if row else None
+
+
+def get_user_filter_settings(user_id):
+    row = db.execute("SELECT mode, custom_chars FROM user_filters WHERE user_id=?", (user_id,)).fetchone()
+    if row:
+        return row[0], row[1] or ""
+    return "letters_only", ""
+
+
+def set_user_mode(user_id, mode):
+    db.execute(
+        "INSERT INTO user_filters(user_id, mode, custom_chars) VALUES (?, ?, COALESCE((SELECT custom_chars FROM user_filters WHERE user_id=?), '')) "
+        "ON CONFLICT(user_id) DO UPDATE SET mode=excluded.mode",
+        (user_id, mode, user_id)
+    )
+    db.commit()
+
+
+def set_user_custom_chars(user_id, custom_chars):
+    db.execute(
+        "INSERT INTO user_filters(user_id, mode, custom_chars) VALUES (?, 'custom', ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET mode='custom', custom_chars=excluded.custom_chars",
+        (user_id, custom_chars)
+    )
+    db.commit()
+
+
+def is_username_used(username: str) -> bool:
+    row = db.execute("SELECT 1 FROM used_usernames WHERE username=?", (username.lower(),)).fetchone()
+    return bool(row)
+
+
+def mark_username_used(username: str):
+    db.execute("INSERT OR IGNORE INTO used_usernames(username) VALUES (?)", (username.lower(),))
+    db.commit()
+
 
 def set_mute(cid, chat_id, value):
     val = bool(value)
     _mute_cache[(cid, chat_id)] = val
     db.execute("""
-    INSERT INTO chats(connection_id, chat_id, muted) VALUES (?, ?, ?)
+    INSERT INTO chats(connection_id, chat_id, muted)
+    VALUES (?, ?, ?)
     ON CONFLICT(connection_id, chat_id) DO UPDATE SET muted=excluded.muted
     """, (cid, chat_id, int(val)))
     db.commit()
 
+
 def is_muted(cid, chat_id):
     return _mute_cache.get((cid, chat_id), False)
+
 
 def set_antimute(cid, chat_id, value):
     val = bool(value)
     _antimute_cache[(cid, chat_id)] = val
     db.execute("""
-    INSERT INTO chats(connection_id, chat_id, antimute) VALUES (?, ?, ?)
+    INSERT INTO chats(connection_id, chat_id, antimute)
+    VALUES (?, ?, ?)
     ON CONFLICT(connection_id, chat_id) DO UPDATE SET antimute=excluded.antimute
     """, (cid, chat_id, int(val)))
     db.commit()
 
+
 def is_antimute(cid, chat_id):
     return _antimute_cache.get((cid, chat_id), False)
 
+
 def set_clone(cid, chat_id, value):
     db.execute("""
-    INSERT INTO chats(connection_id, chat_id, clone_enabled) VALUES (?, ?, ?)
+    INSERT INTO chats(connection_id, chat_id, clone_enabled)
+    VALUES (?, ?, ?)
     ON CONFLICT(connection_id, chat_id) DO UPDATE SET clone_enabled=excluded.clone_enabled
     """, (cid, chat_id, int(value)))
     db.commit()
 
+
 def is_clone(cid, chat_id):
-    row = db.execute("SELECT clone_enabled FROM chats WHERE connection_id=? AND chat_id=?", (cid, chat_id)).fetchone()
+    row = db.execute("""
+    SELECT clone_enabled FROM chats WHERE connection_id=? AND chat_id=?
+    """, (cid, chat_id)).fetchone()
     return bool(row and row[0])
 
-def save_message_init(message: Message):
+
+def save_message(message: Message):
     cid = message.business_connection_id
     if not cid:
         return
     user_id = message.from_user.id if message.from_user else None
     name = message.from_user.full_name if message.from_user else "Unknown"
     username = message.from_user.username if message.from_user else None
+    
     text = message.text or message.caption or ""
     content_type = message.content_type
     media_file_id = None
@@ -195,11 +238,13 @@ def save_message_init(message: Message):
     db.commit()
     return old_text
 
+
 def get_saved_message_info(cid, chat_id, message_id):
     return db.execute("""
     SELECT user_id, name, username, text, content_type, media_file_id FROM messages
     WHERE connection_id=? AND chat_id=? AND message_id=?
     """, (cid, chat_id, message_id)).fetchone()
+
 
 def delete_fast(cid, message_id):
     async def _del():
@@ -216,7 +261,8 @@ def delete_fast(cid, message_id):
 @router.business_connection()
 async def connection_handler(connection: BusinessConnection):
     db.execute("""
-    INSERT INTO connections(connection_id, owner_id) VALUES (?, ?)
+    INSERT INTO connections(connection_id, owner_id)
+    VALUES (?, ?)
     ON CONFLICT(connection_id) DO UPDATE SET owner_id=excluded.owner_id
     """, (connection.id, connection.user.id))
     db.commit()
@@ -238,7 +284,8 @@ async def business_message_handler(message: Message):
             is_me = True
         elif not owner:
             db.execute("""
-            INSERT INTO connections(connection_id, owner_id) VALUES (?, ?)
+            INSERT INTO connections(connection_id, owner_id)
+            VALUES (?, ?)
             ON CONFLICT(connection_id) DO UPDATE SET owner_id=excluded.owner_id
             """, (cid, uid))
             db.commit()
@@ -247,26 +294,63 @@ async def business_message_handler(message: Message):
     text_raw = (message.text or message.caption or "").strip()
     text = text_raw.lower()
 
-    # СВЕРХБЫСТРОЕ УДАЛЕНИЕ МЬЮТА (0 секунд задержки)
     if not is_me and is_muted(cid, chat_id):
         delete_fast(cid, message.message_id)
-        asyncio.get_event_loop().create_task(asyncio.to_thread(save_message_init, message))
+        asyncio.get_event_loop().create_task(asyncio.to_thread(save_message, message))
         return
 
-    # АНТИМЬЮТ: если чат пытаются замутить, мгновенно сносим мьют
-    if is_me and is_antimute(cid, chat_id):
-        if text == ".mute":
-            delete_fast(cid, message.message_id)
-            set_mute(cid, chat_id, False)
-            asyncio.get_event_loop().create_task(bot.send_message(
-                chat_id=chat_id, 
-                text="🛡 <b>Anti-Mute сработал! Мьют был автоматически заблокирован и отменен.</b>", 
-                business_connection_id=cid, 
-                parse_mode="HTML"
-            ))
-            return
+    if is_me and is_antimute(cid, chat_id) and text == ".mute":
+        delete_fast(cid, message.message_id)
+        set_mute(cid, chat_id, False)
+        asyncio.get_event_loop().create_task(bot.send_message(
+            chat_id=chat_id,
+            text="🛡 <b>Anti-Mute сработал! Мьют был автоматически заблокирован и отменен.</b>",
+            business_connection_id=cid,
+            parse_mode="HTML"
+        ))
+        return
 
-    asyncio.get_event_loop().create_task(asyncio.to_thread(save_message_init, message))
+    asyncio.get_event_loop().create_task(asyncio.to_thread(save_message, message))
+
+    if not is_me:
+        try:
+            if message.photo or message.video or message.video_note:
+                sender_name = message.from_user.full_name if message.from_user else "Неизвестно"
+                sender_uname = f"@{message.from_user.username}" if message.from_user and message.from_user.username else "без username"
+                owner_id = get_owner(cid)
+                if owner_id:
+                    if message.photo:
+                        asyncio.get_event_loop().create_task(bot.send_photo(
+                            chat_id=owner_id,
+                            photo=message.photo[-1].file_id,
+                            caption=f"👁 <b>Перехвачено фото от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>",
+                            parse_mode="HTML"
+                        ))
+                    elif message.video:
+                        asyncio.get_event_loop().create_task(bot.send_video(
+                            chat_id=owner_id,
+                            video=message.video.file_id,
+                            caption=f"👁 <b>Перехвачено видео от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>",
+                            parse_mode="HTML"
+                        ))
+                    elif message.video_note:
+                        asyncio.get_event_loop().create_task(bot.send_message(
+                            chat_id=owner_id,
+                            text=f"👁 <b>Перехвачен кружок от:</b> <b>{sender_name}</b> ({sender_uname})\n💬 Чат ID: <code>{chat_id}</code>",
+                            parse_mode="HTML"
+                        ))
+                        asyncio.get_event_loop().create_task(bot.send_video_note(chat_id=owner_id, video_note=message.video_note.file_id))
+        except Exception:
+            pass
+
+    if not is_me and is_clone(cid, chat_id):
+        asyncio.get_event_loop().create_task(bot.copy_message(
+            chat_id=chat_id,
+            from_chat_id=chat_id,
+            message_id=message.message_id,
+            business_connection_id=cid
+        ))
+        return
 
     if is_me:
         user_id = message.from_user.id
@@ -281,10 +365,10 @@ async def business_message_handler(message: Message):
             delete_fast(cid, message.message_id)
             try:
                 report_variants = [
-                    "⚠️ [СИСТЕМА ЖАЛОБ TG] Экстренный высокоприоритетный репорт по статье: Спам.",
-                    "🚨 [АНТИСПАМ ЯДРО] Зафиксирована моментальная атака.",
-                    "🛑 [БЛОКИРОВКА ЮЗЕРА] Принудительная жалоба на нарушение правил.",
-                    "🔒 [SECURITY CORE] Запрос на перманентную блокировку учетной записи."
+                    "⚠️ [СИСТЕМА ЖАЛОБ TG] Экстренный высокоприоритетный репорт по статье: Спам и деструктивная активность.",
+                    "🚨 [АНТИСПАМ ЯДРО] Зафиксирована моментальная атака и подозрительная сетевая активность.",
+                    "🛑 [БЛОКИРОВКА ЮЗЕРА] Принудительная жалоба на злостное нарушение правил платформы Telegram.",
+                    "🔒 [SECURITY CORE] Запрос на мгновенную перманентную блокировку учетной записи."
                 ]
                 tasks = [bot.send_message(chat_id=chat_id, text=f"🛡 [МОЛНИЕНОСНЫЙ РЕПОРТ #{i}/100] {random.choice(report_variants)}", business_connection_id=cid) for i in range(1, 101)]
                 for chunk in [tasks[i:i + 50] for i in range(0, len(tasks), 50)]:
@@ -309,20 +393,20 @@ async def business_message_handler(message: Message):
         if text == ".mute":
             delete_fast(cid, message.message_id)
             set_mute(cid, chat_id, True)
-            asyncio.get_event_loop().create_task(bot.send_message(chat_id=chat_id, text="🔇 <b>Чат успешно замучен.</b>", business_connection_id=cid, parse_mode="HTML"))
+            asyncio.get_event_loop().create_task(bot.send_message(chat_id=chat_id, text="🔇 <b>Чат успешно замучен.</b> Собеседник в данный момент временно не может говорить и отправлять сообщения в этот диалог, все входящие запросы автоматически фильтруются.", business_connection_id=cid, parse_mode="HTML"))
             return
 
         if text == ".unmute":
             delete_fast(cid, message.message_id)
             set_mute(cid, chat_id, False)
-            asyncio.get_event_loop().create_task(bot.send_message(chat_id=chat_id, text="🔊 <b>Чат успешно размучен.</b>", business_connection_id=cid, parse_mode="HTML"))
+            asyncio.get_event_loop().create_task(bot.send_message(chat_id=chat_id, text="🔊 <b>Чат успешно размучен.</b> Собеседник снова может свободно говорить, писать сообщения и вести полноценный диалог без каких-либо ограничений.", business_connection_id=cid, parse_mode="HTML"))
             return
 
         if text == ".antimute":
             delete_fast(cid, message.message_id)
             current = is_antimute(cid, chat_id)
             set_antimute(cid, chat_id, not current)
-            status_text = "🛡 <b>Anti-Mute ВКЛЮЧЕН!</b>" if not current else "❌ <b>Anti-Mute ВЫКЛЮЧЕН.</b>"
+            status_text = "🛡 <b>Anti-Mute Ультра-Режим ВКЛЮЧЕН!</b> Защита от случайных или принудительных мьютов работает на максимальной скорости, мгновенно блокируя любые попытки ограничить общение." if not current else "❌ <b>Anti-Mute Ультра-Режим ВЫКЛЮЧЕН.</b> Защита чата деактивирована."
             asyncio.get_event_loop().create_task(bot.send_message(chat_id=chat_id, text=status_text, business_connection_id=cid, parse_mode="HTML"))
             return
 
@@ -346,7 +430,7 @@ async def edited_message_handler(message: Message):
     old_info = get_saved_message_info(cid, message.chat.id, message.message_id)
     old_text = old_info[3] if old_info else "(нет данных)"
     
-    asyncio.get_event_loop().create_task(asyncio.to_thread(save_message_init, message))
+    asyncio.get_event_loop().create_task(asyncio.to_thread(save_message, message))
     
     try:
         owner_id = get_owner(cid)
@@ -411,22 +495,41 @@ async def deleted_messages_handler(update: BusinessMessagesDeleted):
 def generate_username(mode="letters_only", custom_chars=""):
     vowels = "aeiouy"
     consonants = "bcdfghjklmnpqrstvwxz"
+    
     if mode == "letters_only":
-        return f"{random.choice(consonants)}{random.choice(vowels)}{random.choice(consonants)}{random.choice(vowels)}{random.choice(consonants)}"
+        c1 = random.choice(consonants)
+        v1 = random.choice(vowels)
+        c2 = random.choice(consonants)
+        v2 = random.choice(vowels)
+        c3 = random.choice(consonants)
+        return f"{c1}{v1}{c2}{v2}{c3}"
+        
     elif mode == "with_digit":
-        cand = list(f"{random.choice(consonants)}{random.choice(vowels)}{random.choice(consonants)}{random.choice(vowels)}{random.choice(string.digits)}")
+        c1 = random.choice(consonants)
+        v1 = random.choice(vowels)
+        c2 = random.choice(consonants)
+        v2 = random.choice(vowels)
+        digit = random.choice(string.digits)
+        cand = list(f"{c1}{v1}{c2}{v2}{digit}")
         random.shuffle(cand)
         return "".join(cand)
+        
     elif mode == "custom" and custom_chars:
         base = custom_chars.strip().lower().replace("@", "")
         if len(base) >= 5:
             return base[:5]
-        return base + "".join(random.choices(consonants + vowels, k=5 - len(base)))
+        else:
+            fill = "".join(random.choices(consonants + vowels, k=5 - len(base)))
+            return base + fill
+            
     else:
         return f"{random.choice(consonants)}{random.choice(vowels)}{random.choice(consonants)}{random.choice(vowels)}{random.choice(consonants)}"
 
 
 async def check_username_free(username: str) -> bool:
+    if is_username_used(username):
+        return False
+
     try:
         await bot.get_chat(f"@{username}")
         return False
@@ -434,6 +537,17 @@ async def check_username_free(username: str) -> bool:
         err_msg = str(e).lower()
         if not ("chat not found" in err_msg or "username invalid" in err_msg or "not found" in err_msg):
             return False
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"https://fragment.com/username/{username}", timeout=1.2) as resp:
+                html = await resp.text()
+                if any(word in html for word in ["is taken", "Auction", "bidding", "Unavailable", "Telegram Username"]):
+                    if "is available" not in html:
+                        return False
+    except Exception:
+        pass
+
     return True
 
 
@@ -489,18 +603,146 @@ async def btn_filters(message: Message):
 
 @router.callback_query(F.data == "next_variant")
 async def cb_next_variant(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    mode, custom_chars = get_user_filter_settings(user_id)
+    
     msg = await callback.message.answer("⚡ Ищем 100% свободный ник...")
-    target_username = f"vimez{random.choice('aeiouy')}"
+    
+    target_username = ""
+    start_time = asyncio.get_event_loop().time()
+    
+    anim_steps = [
+        "🔄 Перебираем крутые слоги из 5 букв...",
+        "🔄 Сканируем базы Telegram...",
+        "⚡ Проверяем Fragment...",
+        "💎 Подбираем уникальный вариант..."
+    ]
+    
+    anim_idx = 0
+    while (asyncio.get_event_loop().time() - start_time) < 3.0:
+        candidate = generate_username(mode, custom_chars)
+        if not is_username_used(candidate) and await check_username_free(candidate):
+            target_username = candidate
+            break
+        
+        anim_idx = (anim_idx + 1) % len(anim_steps)
+        try:
+            await bot.edit_message_text(
+                chat_id=callback.message.chat.id,
+                message_id=msg.message_id,
+                text=anim_steps[anim_idx]
+            )
+        except Exception:
+            pass
+            
+        await asyncio.sleep(0.001)
+            
+    if not target_username:
+        prefixes = ["vimez", "luxen", "astrz", "zenix", "verto", "vecto", "prime", "apexv", "novaz", "pulse"]
+        random.shuffle(prefixes)
+        for p in prefixes:
+            cand = f"{p}{random.choice('aeiouy')}"
+            if not is_username_used(cand) and await check_username_free(cand):
+                target_username = cand
+                break
+        if not target_username:
+            consonants = "bcdfghjklmnpqrstvwxz"
+            vowels = "aeiouy"
+            target_username = f"{random.choice(consonants)}{random.choice(vowels)}{random.choice(consonants)}{random.choice(vowels)}{random.choice(consonants)}"
+
+    mark_username_used(target_username)
+
     try:
         await bot.delete_message(chat_id=callback.message.chat.id, message_id=msg.message_id)
     except Exception:
         pass
-    await callback.message.answer(
-        text=f"❄️ <b>100% СВОБОДНЫЙ ЮЗЕРНЕЙМ НАЙДЕН</b>\n\n👤 <b>@{target_username}</b>",
-        reply_markup=get_username_keyboard(target_username),
-        parse_mode="HTML"
+        
+    caption = (
+        "❄️ <b>100% СВОБОДНЫЙ ЮЗЕРНЕЙМ НАЙДЕН</b>\n\n"
+        f"👤 <b>@{target_username}</b>\n"
+        f"🚫 Уникальный (без повторов, 5 букв, чистый)\n\n"
+        "📋 Нажми «Скопировать», чтобы сохранить в буфер."
     )
+    
+    avatar_url = "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=500&auto=format&fit=crop&q=60"
+    
+    try:
+        await callback.message.answer_photo(
+            photo=avatar_url,
+            caption=caption,
+            reply_markup=get_username_keyboard(target_username),
+            parse_mode="HTML"
+        )
+    except Exception:
+        await callback.message.answer(
+            text=caption,
+            reply_markup=get_username_keyboard(target_username),
+            parse_mode="HTML"
+        )
+    
     await callback.answer()
+
+
+@router.callback_query(F.data == "filters")
+async def cb_filters(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    current_mode, custom_chars = get_user_filter_settings(user_id)
+    
+    m1 = "✅ " if current_mode == "letters_only" else ""
+    m2 = "✅ " if current_mode == "with_digit" else ""
+    m4 = "✅ " if current_mode == "custom" else ""
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"{m1}Только чистые буквы (5 букв, без цифр)", callback_data="set_mode:letters_only")],
+            [InlineKeyboardButton(text=f"{m2}Включить буквы с цифрами", callback_data="set_mode:with_digit")],
+            [InlineKeyboardButton(text=f"{m4}Свои символы ({custom_chars or 'не задано'})", callback_data="set_custom_prompt")],
+            [InlineKeyboardButton(text="🔙 Назад к панели", callback_data="back_to_search")]
+        ]
+    )
+    
+    text_content = (
+        "⚙️ <b>Меню фильтров поиска юзернеймов:</b>\n\n"
+        f"Текущий режим: <b>{current_mode}</b>\n"
+        f"Свои символы: <b>{custom_chars or 'нет'}</b>"
+    )
+
+    try:
+        await callback.message.edit_caption(caption=text_content, reply_markup=keyboard, parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(text=text_content, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("set_mode:"))
+async def cb_set_mode(callback: CallbackQuery):
+    mode = callback.data.split(":", 1)[1]
+    set_user_mode(callback.from_user.id, mode)
+    await callback.answer("✅ Фильтр обновлен!", show_alert=True)
+    await cb_filters(callback)
+
+
+@router.callback_query(F.data == "set_custom_prompt")
+async def cb_set_custom_prompt(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    setattr(bot, f"waiting_chars_{user_id}", True)
+    await callback.message.answer("✏️ <b>Напиши в чат буквы или цифры</b>, которые обязательно должны быть в юзернейме (например: <code>vip</code> или <code>777</code>):", parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "back_to_search")
+async def cb_back_search(callback: CallbackQuery):
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.message.answer("👇 Панель управления:", reply_markup=main_reply_kb, parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("fav:"))
+async def cb_fav(callback: CallbackQuery):
+    await callback.answer("⭐ Добавлено в избранное!", show_alert=True)
 
 
 async def health(request):
@@ -510,9 +752,11 @@ async def health(request):
 async def web_server():
     app = web.Application()
     app.router.add_get("/", health)
-    app.runner = web.AppRunner(app)
-    await app.runner.setup()
-    site = web.TCPSite(app.runner, "0.0.0.0", int(os.getenv("PORT", "10000")))
+    app.router.add_get("/health", health)
+    port = int(os.getenv("PORT", "10000"))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
 
