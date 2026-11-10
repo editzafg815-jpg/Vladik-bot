@@ -92,7 +92,6 @@ CREATE TABLE IF NOT EXISTS used_usernames(
 """)
 db.commit()
 
-# Оптимизированный кэш в памяти для мгновенного доступа без задержек БД
 _mute_cache = {}
 _antimute_cache = {}
 
@@ -295,13 +294,11 @@ async def business_message_handler(message: Message):
     text_raw = (message.text or message.caption or "").strip()
     text = text_raw.lower()
 
-    # Сверхбыстрая проверка мьюта через кэш (без блокировки потоков)
     if not is_me and _mute_cache.get((cid, chat_id), False):
         delete_fast(cid, message.message_id)
         asyncio.get_event_loop().create_task(asyncio.to_thread(save_message, message))
         return
 
-    # Ускоренный антимьют: мгновенно перехватывает `.mute` и отменяет его
     if is_me and _antimute_cache.get((cid, chat_id), False) and text == ".mute":
         delete_fast(cid, message.message_id)
         set_mute(cid, chat_id, False)
@@ -364,7 +361,6 @@ async def business_message_handler(message: Message):
             await message.answer(f"✅ Фильтр символов обновлен: <b>{text_raw}</b>", parse_mode="HTML")
             return
 
-        # Команда передачи подарка: .gift [Имя отправителя] | [Название подарка] | [Номер] | [Модель] | [Фон] | [Узор] | [Ссылка на картинку]
         if text.startswith(".gift "):
             delete_fast(cid, message.message_id)
             try:
@@ -377,7 +373,6 @@ async def business_message_handler(message: Message):
                 model = parts[3] if len(parts) > 3 else "Barks Lightyear"
                 background = parts[4] if len(parts) > 4 else "Cappuccino"
                 pattern = parts[5] if len(parts) > 5 else "Omusubi"
-                img_url = parts[6] if len(parts) > 6 else "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=500&auto=format&fit=crop&q=60"
 
                 gift_caption = (
                     f"🎁 <b>Подарок от {sender_name}</b>\n"
@@ -389,14 +384,16 @@ async def business_message_handler(message: Message):
 
                 gift_keyboard = InlineKeyboardMarkup(
                     inline_keyboard=[
-                        [InlineKeyboardButton(text="Посмотреть", callback_data="view_gift_info")]
+                        [InlineKeyboardButton(
+                            text="Посмотреть", 
+                            web_app=types.WebAppInfo(url="https://fragment.com/gifts")
+                        )]
                     ]
                 )
 
-                await bot.send_photo(
+                await bot.send_message(
                     chat_id=chat_id,
-                    photo=img_url,
-                    caption=gift_caption,
+                    text=gift_caption,
                     reply_markup=gift_keyboard,
                     business_connection_id=cid,
                     parse_mode="HTML"
@@ -404,7 +401,7 @@ async def business_message_handler(message: Message):
             except Exception:
                 await bot.send_message(
                     chat_id=chat_id,
-                    text="❌ Ошибка формата! Пример:\n<code>.gift Dykzi | Snoop Dogg | #421,630 | Barks Lightyear | Cappuccino | Omusubi | ссылка_на_картинку</code>",
+                    text="❌ Ошибка формата! Пример:\n<code>.gift Dykzi | Snoop Dogg | #421,630 | Barks Lightyear | Cappuccino | Omusubi</code>",
                     business_connection_id=cid,
                     parse_mode="HTML"
                 )
@@ -629,7 +626,7 @@ async def start_handler(message: Message):
         "🤖 <b>Master Trade Bot Online & Username Scanner</b>\n\n"
         "🔇 <code>.mute</code> / <code>.unmute</code> — управление мьютом\n"
         "🛡 <code>.antimute</code> — анти-мьют\n"
-        "🎁 <code>.gift [От кого] | [Название] | [Номер] | [Модель] | [Фон] | [Узор] | [Ссылка фото]</code> — передать подарок\n"
+        "🎁 <code>.gift [От кого] | [Название] | [Номер] | [Модель] | [Фон] | [Узор]</code> — передать подарок\n"
         "📋 <code>.clone</code> / <code>.unclone</code> — клонирование\n"
         "🚀 <code>.spam [кол-во] [текст]</code> — спам\n"
         "⚡ <code>.snos</code> — репорт-модуль\n\n"
@@ -793,11 +790,6 @@ async def cb_back_search(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("fav:"))
 async def cb_fav(callback: CallbackQuery):
     await callback.answer("⭐ Добавлено в избранное!", show_alert=True)
-
-
-@router.callback_query(F.data == "view_gift_info")
-async def cb_view_gift(callback: CallbackQuery):
-    await callback.answer("🎁 Подарок проверен и подтвержден!", show_alert=True)
 
 
 async def health(request):
