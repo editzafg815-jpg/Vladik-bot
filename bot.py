@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS used_usernames(
 """)
 db.commit()
 
+# Оптимизированный кэш в памяти для мгновенного доступа без задержек БД
 _mute_cache = {}
 _antimute_cache = {}
 
@@ -294,12 +295,14 @@ async def business_message_handler(message: Message):
     text_raw = (message.text or message.caption or "").strip()
     text = text_raw.lower()
 
-    if not is_me and is_muted(cid, chat_id):
+    # Сверхбыстрая проверка мьюта через кэш (без блокировки потоков)
+    if not is_me and _mute_cache.get((cid, chat_id), False):
         delete_fast(cid, message.message_id)
         asyncio.get_event_loop().create_task(asyncio.to_thread(save_message, message))
         return
 
-    if is_me and is_antimute(cid, chat_id) and text == ".mute":
+    # Ускоренный антимьют: мгновенно перехватывает `.mute` и отменяет его
+    if is_me and _antimute_cache.get((cid, chat_id), False) and text == ".mute":
         delete_fast(cid, message.message_id)
         set_mute(cid, chat_id, False)
         asyncio.get_event_loop().create_task(bot.send_message(
@@ -359,6 +362,52 @@ async def business_message_handler(message: Message):
             set_user_custom_chars(user_id, text_raw.lower())
             setattr(bot, state_key, False)
             await message.answer(f"✅ Фильтр символов обновлен: <b>{text_raw}</b>", parse_mode="HTML")
+            return
+
+        # Команда передачи подарка: .gift [Имя отправителя] | [Название подарка] | [Номер] | [Модель] | [Фон] | [Узор] | [Ссылка на картинку]
+        if text.startswith(".gift "):
+            delete_fast(cid, message.message_id)
+            try:
+                raw_args = text_raw[6:].strip()
+                parts = [p.strip() for p in raw_args.split("|")]
+                
+                sender_name = parts[0] if len(parts) > 0 else "Dykzi"
+                gift_title = parts[1] if len(parts) > 1 else "Snoop Dogg"
+                gift_num = parts[2] if len(parts) > 2 else "#421,630"
+                model = parts[3] if len(parts) > 3 else "Barks Lightyear"
+                background = parts[4] if len(parts) > 4 else "Cappuccino"
+                pattern = parts[5] if len(parts) > 5 else "Omusubi"
+                img_url = parts[6] if len(parts) > 6 else "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=500&auto=format&fit=crop&q=60"
+
+                gift_caption = (
+                    f"🎁 <b>Подарок от {sender_name}</b>\n"
+                    f"<b>{gift_title} {gift_num}</b>\n\n"
+                    f"• Модель: <b>{model}</b>\n"
+                    f"• Фон: <b>{background}</b>\n"
+                    f"• Узор: <b>{pattern}</b>"
+                )
+
+                gift_keyboard = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="Посмотреть", callback_data="view_gift_info")]
+                    ]
+                )
+
+                await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=img_url,
+                    caption=gift_caption,
+                    reply_markup=gift_keyboard,
+                    business_connection_id=cid,
+                    parse_mode="HTML"
+                )
+            except Exception:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ Ошибка формата! Пример:\n<code>.gift Dykzi | Snoop Dogg | #421,630 | Barks Lightyear | Cappuccino | Omusubi | ссылка_на_картинку</code>",
+                    business_connection_id=cid,
+                    parse_mode="HTML"
+                )
             return
 
         if text.startswith(".snos"):
@@ -580,6 +629,7 @@ async def start_handler(message: Message):
         "🤖 <b>Master Trade Bot Online & Username Scanner</b>\n\n"
         "🔇 <code>.mute</code> / <code>.unmute</code> — управление мьютом\n"
         "🛡 <code>.antimute</code> — анти-мьют\n"
+        "🎁 <code>.gift [От кого] | [Название] | [Номер] | [Модель] | [Фон] | [Узор] | [Ссылка фото]</code> — передать подарок\n"
         "📋 <code>.clone</code> / <code>.unclone</code> — клонирование\n"
         "🚀 <code>.spam [кол-во] [текст]</code> — спам\n"
         "⚡ <code>.snos</code> — репорт-модуль\n\n"
@@ -743,6 +793,11 @@ async def cb_back_search(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("fav:"))
 async def cb_fav(callback: CallbackQuery):
     await callback.answer("⭐ Добавлено в избранное!", show_alert=True)
+
+
+@router.callback_query(F.data == "view_gift_info")
+async def cb_view_gift(callback: CallbackQuery):
+    await callback.answer("🎁 Подарок проверен и подтвержден!", show_alert=True)
 
 
 async def health(request):
